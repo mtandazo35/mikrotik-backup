@@ -1,9 +1,98 @@
 # mkbackup
 
 Respaldo de configuraciones MikroTik: **texto plano versionado en git** y
-**backup binario con retención**.
+**backup binario con retención**, con un **panel web multiempresa** para
+mirarlo y gestionarlo.
 
-Pensado para una flota de ~300 RouterOS en un ISP.
+Pensado para una flota de ~300 RouterOS en un ISP que administra equipos de
+varios clientes.
+
+---
+
+## ⚡ Instalación en una línea
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/mikrotik-backup/main/install.sh | bash
+```
+
+Para **Debian y derivados** (necesita `apt-get`) y **como root**: todo vive
+bajo `/root`, así que el instalador se niega si no lo eres.
+
+Lo que hace: instala `git`, `python3` y `python3-venv`; clona el código en
+`/root/mkbackup/app`; crea el entorno virtual en `/root/mkbackup/.venv`;
+intenta añadir `openpyxl` (opcional, solo para importar `.xlsx`, y si falla
+sigue adelante); deja `config.yaml` e `inventory.csv` en `/root/mkbackup` con
+permisos `0600`; e instala y arranca las dos unidades de systemd.
+
+**Es idempotente**: volver a lanzarlo es la forma de actualizar. Hace `fetch` y
+`reset --hard` sobre el código y reinstala las unidades, y **no toca
+`config.yaml`, el inventario ni los datos** si ya existen.
+
+Al terminar imprime la **clave del panel**, generada al azar en la instalación
+nueva:
+
+```
+  Panel:  http://127.0.0.1:8080/
+  Usuario: admin
+  Clave:   <20 caracteres al azar>
+
+    APUNTALA AHORA: no se guarda en ningun sitio, solo su hash.
+```
+
+Apúntala en ese momento: en `config.yaml` solo queda su **hash pbkdf2**, no la
+clave. Si se pierde, se cambia con `mkbackup --clave-usuario admin` (ver
+[Rescate por terminal](#rescate-por-terminal)).
+
+El script **no pide nada por teclado a propósito**: cuando llega por una
+tubería, la entrada estándar *es* el propio script, y un `read` se comería las
+líneas que faltan por ejecutar. De ahí que la clave se genere sola.
+
+> Si prefieres no ejecutar un script de internet a ciegas, léelo antes
+> (`curl -fsSL https://raw.githubusercontent.com/mtandazo35/mikrotik-backup/main/install.sh | less`)
+> o clona el repositorio e instala a mano con la receta de abajo.
+
+Se puede desviar con tres variables: `MKBACKUP_REPO`, `MKBACKUP_RAMA` y
+`MKBACKUP_DESTINO`.
+
+**Antes de soltarlo sobre la flota, lee [Estado](#estado).**
+
+### Instalación manual
+
+El código va en `app/` y los datos en la carpeta de arriba. Es el mismo reparto
+que hace el instalador, y las unidades de systemd lo dan por hecho
+(`WorkingDirectory=/root/mkbackup/app`). Están separados a propósito: con el
+repositorio y los respaldos mezclados, un `git clean` de alguien depurando se
+lleva los backups por delante.
+
+```bash
+# En el servidor (Debian 12/13), como root
+mkdir -p /root/mkbackup && chmod 700 /root/mkbackup
+git clone https://github.com/mtandazo35/mikrotik-backup.git /root/mkbackup/app
+cd /root/mkbackup
+
+python3 -m venv .venv
+.venv/bin/pip install -r app/requirements.txt
+.venv/bin/pip install openpyxl          # opcional: importar .xlsx
+
+cp app/config.example.yaml /root/mkbackup/config.yaml
+head -n 1 app/examples/inventory.csv > /root/mkbackup/inventory.csv
+
+chmod 700 /root                          # en Debian ya viene así: compruébalo
+chmod 600 /root/mkbackup/config.yaml     # lleva credenciales
+chmod 600 /root/mkbackup/inventory.csv   # puede llevarlas también
+
+# Generar la clave del panel y pegar el hash en web.clave_hash
+cd app && ../.venv/bin/python -m mkbackup.cli --hash-clave
+```
+
+El inventario se crea solo con la cabecera y no con los equipos de ejemplo: si
+no, el primer ciclo se pasa minutos intentando conectar con IPs que no existen
+y el panel abre con una pantalla llena de fallos que no son de nadie. Los
+ejemplos están en `app/examples/inventory.csv` para copiar de ahí.
+
+Después, editar `config.yaml`, instalar las unidades (ver
+[Automatizar](#automatizar-el-programador-no-un-timer)) y seguir con
+[Preparar los MikroTik](#preparar-los-mikrotik).
 
 ---
 
@@ -23,8 +112,14 @@ Verificado:
 - **Alta con nombre automático**: un equipo dado de alta sin nombre responde su
   `/system identity` y entra con él; el que no responde entra con su IP y el
   primer respaldo correcto lo renombra solo, moviendo su histórico con `git mv`
+- **Cuentas, roles, permisos y alcance por empresa** (`tests/test_usuarios.py`),
+  incluida la invariante del último administrador total y la migración del
+  archivo de usuarios del formato 1 al 2
+- **Lo que se sabe de cada equipo** —modelo, versión, último respaldo bueno— y
+  la regla de que un dato vacío nunca pisa uno bueno (`tests/test_hechos.py`)
 - **Importación** de plantillas CSV y `.xlsx`, **diffs enmascarados** y el
-  **panel** entero (login, altas, bajas, edición, historial, ajustes)
+  **panel** entero (login, altas, bajas, edición, historial, usuarios,
+  auditoría, ajustes)
 - **Intervalo por equipo**: a quién le toca, herencia del intervalo general,
   descuento del ciclo y suelo del tic (`tests/test_planificador.py`)
 - Manejo de equipo inalcanzable: respeta el timeout, reintenta y sale con
@@ -38,6 +133,7 @@ Sin verificar todavía, hace falta hardware:
 - **Las credenciales por equipo contra un router real.** La resolución de qué
   usuario y qué clave se usan está probada; que RouterOS acepte esa combinación
   cuando viene del inventario y no de `config.yaml`, no
+- **El modelo leído de `board-name`** en equipos reales de v6 y v7
 
 No lo pongas a respaldar 300 equipos sin haber hecho antes un `--solo` contra
 uno de verdad.
@@ -109,32 +205,15 @@ ruido no cuente como cambio, y que un cambio real sí se detecte.
 
 ---
 
-## Instalación
-
-```bash
-# En el servidor (Debian 12/13), como root
-git clone <este-repo> /root/mkbackup
-cd /root/mkbackup
-
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-
-cp config.example.yaml /root/mkbackup/config.yaml
-cp examples/inventory.csv /root/mkbackup/inventory.csv
-
-chmod 700 /root                          # en Debian ya viene así: compruébalo
-chmod 600 /root/mkbackup/config.yaml     # lleva credenciales
-chmod 600 /root/mkbackup/inventory.csv   # puede llevarlas también
-
-# Editar /root/mkbackup/config.yaml y el inventario
-```
+## Instalación, en detalle
 
 ### Todo vive bajo /root, y lo que eso cuesta
 
 Los datos —repositorio git, binarios, inventario, `estado.json`,
-`ajustes.json`— van a **`/root/mkbackup`**, y las dos unidades de systemd corren
-con `User=root`, `ProtectHome=false` y `ReadWritePaths=/root/mkbackup`. Es lo
-que se decidió para este despliegue, y el intercambio conviene tenerlo claro:
+`ajustes.json`, `usuarios.json`, `equipos.json`, `auditoria.log`— van a
+**`/root/mkbackup`**, y las dos unidades de systemd corren con `User=root`,
+`ProtectHome=false` y `ReadWritePaths=/root/mkbackup`. Es lo que se decidió
+para este despliegue, y el intercambio conviene tenerlo claro:
 
 - **A favor:** `/root` es 0700. El inventario puede llevar las contraseñas SSH
   de los routers en claro (ver más abajo), y ahí **no lo lee ningún otro usuario
@@ -149,7 +228,9 @@ que se decidió para este despliegue, y el intercambio conviene tenerlo claro:
 
 `ProtectHome=false` está solo porque `ProtectHome=true` dejaría `/root`
 inaccesible, que es justo donde vive todo; `ReadWritePaths=/root/mkbackup` acota
-lo que se puede escribir.
+lo que se puede escribir. El panel lleva además
+`RestrictAddressFamilies=AF_INET AF_INET6`, porque necesita salir a la red para
+preguntarle su nombre a un router al darlo de alta.
 
 **Bajar el privilegio es un cambio corto** si lo prefieres: crear un usuario
 dedicado, mover la carpeta a un sitio suyo y ajustar `User=`, `Group=` y
@@ -158,7 +239,7 @@ inventario tiene que quedar en un directorio que solo ese usuario pueda leer.
 
 ### Dónde va el inventario (léelo antes de instalar)
 
-El inventario **ya no es de solo lectura**: lo reescriben el panel (altas,
+El inventario **no es de solo lectura**: lo reescriben el panel (altas,
 ediciones, bajas, importación) y el renombrado automático de los equipos dados
 de alta sin nombre.
 
@@ -198,9 +279,10 @@ Dos policies que suelen olvidarse:
 `address=` restringe el usuario a la IP del servidor de respaldo: aunque la
 clave se filtre, no sirve desde otro sitio.
 
-Si un cliente no deja crear este usuario en sus routers, esos equipos pueden
-traer las suyas en el inventario (columnas `usuario` y `clave`, ver
-[Credenciales por equipo](#credenciales-por-equipo)).
+Esas credenciales generales se ponen en la sección `ssh:` de `config.yaml` o
+desde **Ajustes** en el panel. Si un cliente no deja crear este usuario en sus
+routers, esos equipos pueden traer las suyas en el inventario (columnas
+`usuario` y `clave`, ver [Credenciales por equipo](#credenciales-por-equipo)).
 
 ### Probar antes de soltar la flota
 
@@ -221,23 +303,21 @@ traer las suyas en el inventario (columnas `usuario` y `clave`, ver
 `mkbackup.service` es un **proceso residente** (`mkbackup --planificador`) que
 vive siempre y dispara él los ciclos: cada `planificador.intervalo_minutos`, o
 antes si algún equipo lleva un intervalo propio más corto en el inventario.
-**Ya no hay `mkbackup.timer`.**
+**No hay `mkbackup.timer`.**
 
 ```bash
 cp systemd/mkbackup.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now mkbackup
-systemctl status mkbackup
-
-# Opcional: panel para ver como va y gestionar la flota (ver mas abajo).
-# Antes hay que poner web.clave_hash en el config.yaml: sin login no arranca.
 cp systemd/mkbackup-web.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now mkbackup-web
+systemctl enable --now mkbackup mkbackup-web
+systemctl status mkbackup mkbackup-web
 ```
 
-**Si vienes de la versión anterior**, el timer hay que quitarlo a mano o
-seguirás lanzando ciclos por duplicado:
+El panel **no arranca sin login**: hace falta `web.clave_hash` en el
+`config.yaml`, o un `usuarios.json` con al menos una cuenta.
+
+**Si vienes de una versión con timer**, hay que quitarlo a mano o seguirás
+lanzando ciclos por duplicado:
 
 ```bash
 systemctl disable --now mkbackup.timer
@@ -294,7 +374,7 @@ ritmo que un core: consultarlo menos le quita trabajo a él —cada respaldo es 
 sesión SSH y un `/export` completo— y a la red. Al revés también: un core se
 puede poner a 30 minutos sin bajarle el intervalo a los otros 299 equipos.
 
-El programador **ya no respalda la flota entera en cada ciclo**: mira a quién le
+El programador **no respalda la flota entera en cada ciclo**: mira a quién le
 toca y consulta solo a esos, y **si no le toca a nadie no lanza ciclo** (ni
 estado de "0 equipos", ni git tocado para nada). Ver `equipos_pendientes` y
 `toca_ahora` en `mkbackup/planificador.py`.
@@ -369,9 +449,9 @@ entrar en una subcarpeta por grupo a buscar un router del que ya nadie recuerda
 si se clasificó como `core` o como `bts`.
 
 **El `grupo` sigue existiendo** en el inventario y en el panel: clasifica y
-filtra. Lo que ya no hace es decidir dónde se guarda el archivo. Efecto útil de
-eso: **reclasificar un equipo de grupo ya no mueve su archivo ni parte su
-histórico de git.** Solo lo mueven el cambio de nombre y el de empresa, y ahí el
+filtra. Lo que no hace es decidir dónde se guarda el archivo. Efecto útil de
+eso: **reclasificar un equipo de grupo no mueve su archivo ni parte su histórico
+de git.** Solo lo mueven el cambio de nombre y el de empresa, y ahí el
 movimiento se hace con `git mv`.
 
 El árbol de binarios copia el mismo esquema (`binarios/empresa/equipo/`).
@@ -383,6 +463,10 @@ de git, las tildes se codifican distinto según el sistema de archivos (NFC en
 Linux, NFD en macOS) y el mismo respaldo acabaría en dos carpetas según quién
 clone el repo. Si dos empresas distintas producen el mismo slug, `cargar` avisa:
 sus respaldos se mezclarían en una sola carpeta.
+
+Ese slug es además la unidad con la que se compara el **alcance** de una cuenta
+del panel (ver [Multitenant](#multitenant-quién-ve-qué-equipos)): es la
+granularidad a la que los datos están de verdad separados en disco.
 
 Los inventarios **sin la columna `empresa` siguen cargando**: esas filas caen
 en `sin-empresa` y nada se rompe.
@@ -424,7 +508,8 @@ ssh admin@10.20.30.11 "/system backup load name=BTS-Norte-01_20260725_120000_123
 ```
 
 Restaura con la **misma versión de RouterOS** con la que se hizo el respaldo:
-comandos que existen en una versión pueden no existir en otra.
+comandos que existen en una versión pueden no existir en otra. **El panel no
+restaura nada**: esto es a mano, y a propósito.
 
 ---
 
@@ -434,17 +519,28 @@ El respaldo corre desatendido y lo único que deja es el journal. Con 300
 equipos, un ciclo dura lo suficiente como para que alguien pregunte si está
 corriendo; y el inventario lo mantiene gente que no va a editar un CSV por SSH.
 
-El panel cubre las dos cosas, en un proceso aparte del respaldo: **ver cómo va
-el ciclo** y **gestionar la flota** (altas, importación, historial de cambios y
-cada cuánto se respalda). Lo que sigue sin hacer, y por qué, está al final de
-esta sección.
+El panel cubre eso, en un proceso aparte del respaldo: **ver cómo va el ciclo**,
+**gestionar la flota** (altas, importación, historial, cada cuánto se respalda)
+y **repartir quién ve qué** con cuentas, roles y alcance por empresa. Lo que
+sigue sin hacer, y por qué, está al final de esta sección.
+
+```bash
+.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --web
+# http://127.0.0.1:8080/
+```
+
+La navegación tiene seis secciones —Estado, Equipos, Cambios, Usuarios,
+Auditoría, Ajustes— y **cada una aparece solo si la cuenta tiene su permiso**.
+Esconder el enlace no protege nada, así que además **cada ruta lo comprueba en
+el servidor**: cualquiera puede escribir la URL a mano.
 
 ### Primero la clave: el panel no arranca sin login
 
 La lista de nombres, IPs, empresas y grupos de toda la flota es un mapa de la
 red. Por eso pide usuario y contraseña, y por eso **`servir()` se niega a
-arrancar si `web.clave_hash` está vacío** (sale con código 2 y lo dice en el
-log) en vez de quedarse abierto de par en par por un descuido de configuración.
+arrancar** (sale con código 2 y lo dice en el log) si falta `web.clave_hash` o
+si no hay ninguna cuenta, en vez de quedarse abierto de par en par por un
+descuido de configuración.
 
 La clave no se escribe en el YAML. Se genera su hash:
 
@@ -459,52 +555,286 @@ La clave no se escribe en el YAML. Se genera su hash:
 ```
 
 La pide dos veces, exige **8 caracteres como mínimo** y no guarda nada: solo
-imprime la línea para pegarla en `web:` de `/root/mkbackup/config.yaml`. Lo que
-vive en el archivo es un **pbkdf2-sha256 con sal**, así que copiar la
-configuración, respaldarla o mirarla por encima del hombro no reparte la clave.
+imprime la línea para pegarla en `web:` de `/root/mkbackup/config.yaml`, que es
+de donde saldrá la cuenta inicial la primera vez que arranque el panel. A partir
+de ahí, las claves se cambian **desde el propio panel** (cada cuenta la suya en
+`/cuenta`, pidiendo la actual) o con `--clave-usuario`.
 
-| Opción | Por defecto | Qué hace |
+| Opción de `web:` | Por defecto | Qué hace |
 |---|---|---|
-| `usuario` | `admin` | El único que hay: no existen altas de usuarios ni recuperación de clave. |
+| `usuario` | `admin` | La cuenta que se siembra en el archivo de usuarios la primera vez. Después manda ese archivo. |
 | `clave_hash` | *(vacío)* | El hash de `--hash-clave`. Vacío = el panel no arranca. |
 | `sesion_horas` | `8` | Cuánto dura la sesión antes de volver a pedir la clave. |
 | `intentos_max` | `5` | Fallos seguidos desde una IP antes de frenarla. |
 | `bloqueo_segundos` | `300` | Lo que espera esa IP tras pasarse de intentos. |
+| `eventos_por_pagina` | `30` | Eventos por página en la auditoría. |
+| `fondo_login` | *(vacío)* | Imagen de la pantalla de entrada. Se sube desde Ajustes. |
 
 El bloqueo es **por IP** y en memoria: cinco intentos fallidos y esa dirección
 queda cinco minutos fuera, con la respuesta 429 diciendo cuánto le falta. Un
-acierto borra su contador. En el log queda una línea por intento fallido y otra
-por sesión abierta, con la IP — no hay más auditoría que esa.
+acierto borra su contador, y desde `/auditoria` se puede levantar a mano.
 
 La sesión es una cookie `HttpOnly`, `SameSite=Strict` y con `Max-Age` igual a
 `sesion_horas`; el token es opaco y vive en memoria del proceso, no firmado. El
 precio de eso es que **reiniciar el panel cierra las sesiones abiertas**; a
-cambio, "Salir" las cierra de verdad y no queda un token válido dando vueltas.
-`SameSite=Strict` es además lo que protege las altas y las bajas de un CSRF: un
-POST desde otra página llega sin cookie y muere en el login.
+cambio, "Salir" —y sobre todo echar a alguien— las cierra de verdad y no queda
+un token válido dando vueltas. `SameSite=Strict` es además lo que protege las
+altas y las bajas de un CSRF: un POST desde otra página llega sin cookie y muere
+en el login.
 
-### Levantarlo
+La cuenta de cada petición **se resuelve del archivo, no del token**: es más
+trabajo por petición, pero significa que bajarle el rol a alguien surte efecto
+en la siguiente página que pida, y que una cuenta borrada deja de valer aunque
+su token siguiera vivo.
 
-Se levanta aparte del respaldo:
+### Cuentas, roles y permisos
 
-```bash
-cp systemd/mkbackup-web.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now mkbackup-web
+Las cuentas **no viven en `config.yaml`**: viven en su propio archivo JSON
+(`almacen.usuarios`, por defecto `/root/mkbackup/usuarios.json`), escrito de
+forma atómica y con permisos `0600`. Guarda **hashes pbkdf2-sha256 con sal**,
+nunca contraseñas: quien se lleve una copia del archivo no se lleva las claves
+de nadie.
+
+Va aparte porque `config.yaml` lo edita **una persona con root** —lleva
+comentarios, decisiones y las credenciales de conexión— y el servicio web no
+puede ni debe reescribirlo. Las cuentas, en cambio, se crean y se cambian desde
+la web, así que necesitan un archivo que el servicio pueda escribir.
+
+**Migración automática:** quien ya tenía el panel funcionando con un único
+usuario en `web.usuario` / `web.clave_hash` se encuentra su misma cuenta y su
+misma clave la primera vez que arranca el panel nuevo (`sembrar`), con el rol
+`admin` y acceso a todo. Sin eso, actualizar dejaría a la gente fuera de su
+propio panel. A partir de ahí manda el archivo de usuarios.
+
+Hay **ocho permisos** (`PERMISOS` y `ETIQUETAS_PERMISO` en
+`mkbackup/usuarios.py`). Es una lista cerrada a propósito: un permiso que solo
+existiera en el archivo de un cliente no lo comprobaría nadie.
+
+| Permiso | Qué abre |
+|---|---|
+| `ver` | Ver equipos, estado y cambios |
+| `diferencias` | Ver el contenido de los cambios (diffs) |
+| `equipos.crear` | Añadir equipos |
+| `equipos.editar` | Editar equipos |
+| `equipos.baja` | Dar de baja equipos |
+| `equipos.importar` | Importar desde Excel |
+| `ajustes` | Cambiar los ajustes del programador |
+| `usuarios` | Gestionar usuarios y roles (y ver la auditoría) |
+
+**Los roles son plantillas editables**, no constantes del código: se crean, se
+editan y se borran desde el panel. Una instalación nueva arranca con `admin`,
+`operador` y `lector`, y a partir de ahí son datos — un ISP no tiene los mismos
+perfiles que otro, y pedir un despliegue nuevo para añadir "facturación" no
+tiene sentido. El rol `admin` **no se puede borrar** (es el punto de partida
+conocido para recuperar el control) y un rol que alguien tenga puesto tampoco.
+
+Encima del rol hay **excepciones por usuario**, porque siempre aparece el caso
+de "este de aquí, y solo este, también importa el Excel":
+
+```
+permisos efectivos = (permisos del rol | permisos_mas) - permisos_menos
 ```
 
-O a mano, para probarlo:
+**Quitar gana siempre.** Si un permiso está a la vez en `mas` y en `menos`, se
+queda fuera: ante una duda —o ante una interfaz que mande las dos listas mal— el
+error tiene que caer del lado restrictivo. En el formulario se marcan casillas y
+el panel guarda la **diferencia contra el rol**, no la lista suelta: así, si
+mañana se le añade un permiso al rol, lo hereda quien no lo tenga tocado a mano.
+
+Cambiarle a alguien el rol, los permisos, el alcance o la clave **cierra sus
+sesiones abiertas**. Si no, seguiría dentro con lo de antes hasta que le
+caducara, que es justo el rato en el que hace falta que no lo esté.
+
+#### La invariante: el último administrador total
+
+> **Siempre tiene que quedar al menos un usuario que tenga a la vez el permiso
+> `usuarios` y alcance a todo.**
+
+Ese es el único que puede volver a repartirlo todo: crear cuentas, arreglar
+roles y dar acceso a cualquier empresa. Sin ninguno, el panel se queda sin
+llaves y la única salida es editar el JSON a mano por SSH.
+
+Se protege en **todas** las operaciones que podrían romperla, incluidas las
+indirectas: borrar esa cuenta, cambiarle el rol, quitarle el permiso con
+`permisos_menos`, recortarle el alcance, **quitarle el permiso `usuarios` al rol
+que se lo daba**, o borrar ese rol. No se mira "qué campo cambió": se calcula
+cómo quedaría el sistema entero y se pregunta si sigue habiendo llaves.
+
+Un detalle deliberado: si el archivo ya llegó sin ningún administrador total
+(alguien lo editó a mano y se equivocó), la regla **no** bloquea nada. Congelar
+el panel entonces sería castigar dos veces por el mismo error.
+
+Una cuenta nueva se crea **sin alcance**: no ve ningún equipo hasta que alguien
+diga cuáles. La única excepción es la **primera** cuenta del archivo, que recibe
+alcance total porque alguien tiene que quedarse las llaves.
+
+#### Rescate por terminal
+
+Tres opciones del CLI para cuando no se puede entrar al panel:
 
 ```bash
-.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --web
-# http://127.0.0.1:8080/
+.venv/bin/python -m mkbackup.cli -c config.yaml --listar-usuarios
+.venv/bin/python -m mkbackup.cli -c config.yaml --crear-usuario ana --rol admin
+.venv/bin/python -m mkbackup.cli -c config.yaml --clave-usuario admin
 ```
+
+- `--listar-usuarios` — nombre, rol y último acceso de cada cuenta. Es lo
+  primero que se mira cuando nadie sabe qué cuentas hay.
+- `--crear-usuario` — el arranque: la primera cuenta de una instalación, o una
+  de repuesto si se borró la última con permiso de usuarios. Pide la clave por
+  terminal (mínimo 8 caracteres) y no la escribe en ningún sitio.
+- `--clave-usuario` — el rescate: el único administrador olvidó su clave. Pide
+  la nueva por terminal.
+
+Las sesiones abiertas viven en la memoria del proceso del panel, que es otro:
+tras un `--clave-usuario` hay que reiniciar el panel para cerrarlas.
+
+### Multitenant: quién ve qué equipos
+
+El rol dice **qué puede hacer** una cuenta; el **alcance** dice **sobre qué
+equipos**. Las dos preguntas hay que responderlas siempre: un operador con
+todos los permisos pero con alcance solo a Acme es el técnico de Acme; el mismo
+rol con alcance a todo es el técnico del ISP.
+
+El alcance se da de tres formas, y con **nivel `ver` o `editar`** (editar
+incluye ver):
+
+| Forma | Para qué |
+|---|---|
+| `todo` | El personal del ISP. Manda sobre cualquier otra cosa. |
+| Por **empresa** | El caso normal: un cliente ve sus routers y nada más. |
+| Por **equipo suelto** | El caso raro que siempre aparece. |
+
+**Un permiso sobre un equipo SUMA al de su empresa y nunca resta.** Se toma el
+mayor de los dos. Sirve para enseñar un router de una empresa que por lo demás
+no se ve, o para poder editar uno concreto de una empresa que solo se mira. Lo
+que *no* hace es bajar de nivel: listar un equipo con `ver` dentro de una
+empresa con `editar` no lo deja en solo lectura — para eso hay que quitarle
+`editar` a la empresa y listarlos uno a uno, que es lo explícito.
+
+Las empresas se comparan por su **slug** (`sanear_empresa`), no por el texto
+crudo: "Acme S.A.", "ACME S.A." y "  Acme  S.A. " son la misma empresa, y las
+tildes se normalizan. Los nombres de equipo se comparan sin distinguir
+mayúsculas, porque son nombres de archivo dentro del repo.
+
+**Todo lo que devuelve datos de equipos se filtra**, no solo la tabla:
+
+- **Los totales y las gráficas del panel.** Los contadores del archivo de estado
+  son de la flota entera; se **recalculan** sobre lo que corresponde a la
+  cuenta. Un cliente que ve 12 equipos pero un total de 300 ya sabe el tamaño de
+  su proveedor. El recorte usa **lista blanca**: solo salen los campos que se
+  nombran, así que un campo nuevo en el estado no se publica por descuido.
+- **El estado del programador.** Se recorta a la última consulta de *sus*
+  equipos; el tamaño del último lote y los nombres ajenos no salen.
+- **`/cambios`, `/historial` y `/diferencia`.** `/diferencia` traduce la ruta
+  del repositorio al equipo del inventario antes de decidir: sin eso, escribir a
+  mano la ruta de otra empresa enseñaría su configuración entera. Un equipo dado
+  de baja ya no está en el inventario y no se le puede calcular el alcance: solo
+  lo ve quien lo ve todo.
+- **Los avisos del inventario.** Nombran equipos de toda la flota (líneas
+  descartadas, duplicados, choques de empresa) y además delatan que hay más.
+
+Al **crear o editar** un equipo se comprueba el alcance sobre el equipo **ya
+validado**, no sobre lo que llegó en el formulario, y cambiarle la empresa exige
+poder escribir en las dos: si no, sería una forma de regalarle un equipo a
+alguien — o de robárselo.
+
+> **Cuando algo queda fuera del alcance, la respuesta es 404 y no 403.**
+> Decir "no tienes permiso" sobre un nombre concreto ya confirma que ese equipo
+> existe, y en multitenant eso es información del cliente de al lado. Un 403 se
+> reserva para cuando el equipo **sí** se ve pero no se puede editar, donde ya
+> no hay nada que revelar.
+
+### Auditoría
+
+El log del proceso (journald) está para diagnosticar: se rota y se mezcla con el
+ruido de los respaldos. La auditoría está para responder **quién** y **cuándo**,
+que es la pregunta de después de un incidente. Por eso es un archivo aparte:
+`almacen.auditoria`, por defecto `/root/mkbackup/auditoria.log`, con permisos
+`0600` y **una línea JSON por evento** (fecha UTC, evento, usuario, IP,
+detalle), para poder filtrarla sin analizar texto libre.
+
+Se guardan los accesos (`login_ok`, `login_fallido`, `login_bloqueado`,
+`salir`, `desbloqueo`, `clave_propia`), los intentos rechazados (`sin_permiso`,
+`fuera_de_alcance`) y los cambios: cuentas (`usuario_alta`, `usuario_cambio`,
+`usuario_baja`), roles (`rol_cambio`, `rol_baja`), inventario (`equipo_alta`,
+`equipo_cambio`, `equipo_baja`, `importacion`) y configuración (`ajustes`,
+`acceso_ssh`).
+
+**Nunca guarda claves**, ni hashes, ni tokens de sesión. De un cambio de
+credenciales SSH se anota que cambió y quién, no el valor. Sí se anota el nombre
+**tecleado** en un login fallido aunque no exista ninguna cuenta así: media
+auditoría de un ataque es saber qué cuentas estuvieron probando. Cada valor se
+recorta a una línea sin caracteres de control — si no, quien teclee un salto de
+línea en el formulario puede inventarse líneas enteras del registro.
+
+El archivo **se rota solo** al llegar a 5 MB (del orden de 30.000 eventos) y
+conserva una generación anterior en `.log.1`. Quien necesite historia larga que
+se lo lleve a donde guarde los logs de verdad.
+
+La pantalla `/auditoria` —mismo permiso que gestionar cuentas: quien puede crear
+usuarios es quien tiene que poder ver qué se ha hecho con ellos— filtra por tipo
+de evento, por usuario y por "solo sospechosos", con paginación de
+`web.eventos_por_pagina` eventos (30 por defecto). Si se pide una página que no
+existe se enseña la última completa, y el título dice el rango real en vez de
+mentir. Los intentos fallidos y los bloqueos van en rojo.
+
+Arriba hay una tabla de **direcciones con intentos fallidos**, con cuántos lleva
+cada una y cuánto le queda de bloqueo, y un botón **Desbloquear** para el caso
+del despiste — cinco errores de teclado no tienen por qué costar cinco minutos.
+Se listan también las que **aún no** llegaron al límite: ver "3 de 5 intentos"
+es lo que permite darse cuenta de que algo pasa antes de que salte el bloqueo.
+
+> Esa lista **vive en la memoria del panel**: reiniciarlo la vacía entera. Es el
+> mismo precio que pagan las sesiones (ver abajo), y en un servicio de consulta
+> sale a cuenta.
+
+### Lo que se sabe de cada equipo
+
+Además del inventario —que es lo que alguien **configuró**— el panel enseña lo
+**observado**: lo que el propio RouterOS contó de sí mismo. Vive en
+`almacen.hechos` (`/root/mkbackup/equipos.json`), lo escribe el respaldo y lo
+lee el panel, nunca al revés.
+
+| Dato | De dónde sale |
+|---|---|
+| **Modelo** | `board-name` del `/system resource print` que **ya se ejecuta**. Si viniera recortado, la cabecera `# model = ...` del `/export` que ya se descargó. |
+| **Versión de RouterOS** | `version:` del mismo `/system resource print`. |
+| **Último respaldo bueno** | La fecha del último ciclo que salió bien para ese equipo. |
+| **Último intento** | La fecha del último ciclo que lo tocó, saliera bien o no. |
+
+**Ni un comando ni una sesión SSH de más.** Ese `resource print` ya se hacía
+para saber la versión, que es lo que decide si el export se pide con
+`show-sensitive` (solo existe en v7). Manda `board-name` y la cabecera del
+export queda como respaldo: `board-name` es un campo del menú `/system resource`
+que existe en v6 y en v7, mientras que `# model =` es un comentario que se
+añadió en las v7 y que además pasa por `limpiar_export`, donde un patrón de
+ruido nuevo podría llevárselo por delante sin que nadie lo note.
+
+> **Un dato vacío nunca pisa uno bueno.** Si el ciclo de hoy falló y no se pudo
+> leer el modelo, se conserva el que ya se sabía: un equipo apagado no puede
+> "olvidar" que es un RB4011, porque justo cuando algo lleva fallando es cuando
+> hace falta saber a qué aparato hay que ir.
+
+Por eso son dos fechas y no una. `ultimo_intento` se mueve siempre;
+`ultimo_ok` solo cuando el respaldo salió bien. Eso es lo que permite decir "se
+intentó hace 5 minutos pero el último bueno fue anteayer": si `ultimo_ok` se
+moviera en cada intento, un equipo muerto parecería recién respaldado. En la
+tabla, un equipo con fecha buena pero con el último intento fallido sale marcado
+como **fallando**, porque "respaldado el martes" con el equipo caído desde el
+miércoles es justo lo que engaña.
+
+Esto no se puede deducir de git: un equipo sin cambios no deja commit, así que
+el último commit de su archivo puede ser de hace meses aunque se esté
+respaldando cada cuatro horas sin fallar una vez. Y tampoco sale de
+`estado.json`, que solo habla del ciclo en curso — con intervalos por equipo, un
+router de 24 h no aparece en la mayoría de los ciclos.
+
+### Lo que se ve de un vistazo
 
 La pantalla de estado muestra en qué situación está la ejecución (en curso con
 barra de avance, terminada, terminada con fallos o interrumpida), el detalle
-equipo por equipo, los avisos del inventario y las últimas 20 ejecuciones.
-
-### Lo que se ve de un vistazo
+equipo por equipo, los avisos del inventario y las últimas ejecuciones.
 
 Arriba hay una fila de totales — **Clientes, Equipos, Respaldados, Fallidos,
 Próximo ciclo** — y debajo dos gráficas de tarta con leyenda y conteos:
@@ -516,7 +846,8 @@ Próximo ciclo** — y debajo dos gráficas de tarta con leyenda y conteos:
 
 Los totales se cuentan sobre los **equipos** y no sobre los contadores del
 ciclo: con intervalos por equipo, un ciclo puede tocar solo a una parte de la
-flota, y "3 de 3" no dice nada de los otros 297.
+flota, y "3 de 3" no dice nada de los otros 297. Y todo esto se recorta al
+alcance de quien mira (ver [Multitenant](#multitenant-quién-ve-qué-equipos)).
 
 Se dibujan en **SVG generado en el navegador, sin ninguna librería externa** —
 el proyecto no añade dependencias para pintar dos tartas, y un panel que corre
@@ -526,32 +857,62 @@ CSS y se repintan si el sistema cambia de tema con la pestaña abierta. Por eso
 "Equipos por cliente" corta en cuatro más "Otros": pasado ese punto los sectores
 dejan de distinguirse, y la tabla de abajo tiene el detalle completo.
 
-`/equipos` y `/cambios` llevan además una fila de **filtros** por empresa, grupo
-y nombre o IP. El buscador libre mira nombre e IP a la vez: quien escribe
-`10.20.` busca una subred y quien escribe `BTS` busca por nombre, y obligarle a
-elegir el campo solo estorba.
+### Filtros, orden y columnas
 
-### Las fechas van en hora de Ecuador
+`/equipos` y `/cambios` llevan una fila de **filtros** por empresa, grupo y
+nombre o IP. El buscador libre mira nombre e IP a la vez: quien escribe `10.20.`
+busca una subred y quien escribe `BTS` busca por nombre, y obligarle a elegir el
+campo solo estorba.
 
-Las marcas de tiempo se **guardan siempre en UTC** —una hora local dentro de un
-archivo es una bomba de relojería el día que el servidor cambie de zona— y solo
-se convierten **al mostrarlas**. La zona se configura con `zona_horaria` en
-`config.yaml`, por defecto `America/Guayaquil`.
+La tabla de equipos se **ordena por columna** (nombre, empresa, IP, puerto,
+grupo y "cada"), pulsando la cabecera. Dos detalles:
 
-Si la base IANA no está disponible (Windows sin `tzdata`), para
-`America/Guayaquil` se usa un desfase fijo de −5, que es exacto todo el año
-porque Ecuador no tiene horario de verano. Para cualquier otra zona eso sería
-mentir, así que ahí se avisa en el log y las fechas se quedan en UTC.
+- **Las IP se ordenan por su valor, no como texto.** Como texto, `10.20.0.9`
+  iría después de `10.20.0.10`, que es justo lo que nadie espera. Los nombres
+  DNS no son números: van detrás de todas las IP y entre ellos por texto.
+- **Todas las claves desempatan por el nombre del equipo.** Sin eso, al ordenar
+  por empresa los equipos de una misma empresa saldrían en el orden en que estén
+  en el archivo, que es arbitrario — justo lo que se quiere evitar al pulsar
+  "ordenar".
 
-### Cómo sabe distinguir "corriendo" de "se murió a medias"
+Un intervalo `0` no se ordena como cero: significa "hereda el general" y se va
+al final, que es donde menos molesta cuando lo que buscas son los que tienen uno
+propio.
 
-Mientras la ejecución vive, refresca un **latido** cada 5 segundos en
-`estado.json`. Si el archivo dice que no terminó pero el latido lleva más de
-40 segundos parado, el proceso se cortó — `kill`, OOM, corte de luz — y el
-panel lo reporta como **INTERRUMPIDA**.
+También se **elige qué columnas se ven**. Están disponibles equipo, empresa, IP,
+puerto, grupo, modelo, RouterOS, último respaldo, cada y usuario; por defecto se
+ven todas menos puerto y usuario, que casi siempre traen el valor de siempre y
+ocupan sitio para no decir nada. Lo que se elige es **cuáles**, no en qué orden:
+una tabla que baraja sus columnas según quién la mire deja de ser reconocible.
+La selección viaja en la URL y se conserva al filtrar y al ordenar; una columna
+inventada a mano en la URL se descarta.
 
-Sin eso, una ejecución muerta se quedaría "en curso" para siempre, que es la
-forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
+### La pantalla de entrada tiene fondo
+
+Desde **Ajustes** se sube la imagen que se ve detrás del formulario de login.
+Se acepta **JPG, PNG, WebP y AVIF**, hasta 4 MB.
+
+- **Se comprueba el contenido, no la extensión.** El tipo se decide por los
+  primeros bytes del archivo (firmas de JPEG y PNG, contenedor `RIFF/WEBP` y
+  `ftyp/avif`): renombrar un `.html` a `.jpg` es gratis, y servir un documento
+  desde el origen del panel no lo es.
+- **No se acepta SVG**, aunque sea una imagen: un SVG puede llevar `<script>`
+  dentro, y `/fondo` se sirve en el mismo origen que el panel, así que abrir esa
+  URL ejecutaría ese código con la sesión de quien la abra. Un formato de imagen
+  que además es un documento ejecutable no cabe aquí.
+- **El nombre del archivo lo decide el panel**, no quien sube: se guarda como
+  `fondo-login.<ext>` junto a `ajustes.json`, así que no hay forma de escribir
+  fuera de la carpeta de datos ni de pisar otra cosa. Al cambiar de formato se
+  borra el fondo anterior.
+- **Se sirve sin pedir login**, y es por necesidad: es el fondo de la propia
+  pantalla de entrada, donde todavía no hay sesión. Solo se sirve el archivo que
+  diga la configuración —no hay forma de pedir otro desde la URL— pero
+  **cualquiera que llegue al panel puede verla**: no pongas ahí nada que no
+  quieras enseñar. La página lo dice en pantalla.
+
+La URL lleva una marca (tamaño y fecha del archivo) que cambia cuando cambia la
+imagen: así el navegador la cachea 24 horas y aun así se ve la nueva en cuanto
+se sube otra. Es la única respuesta del panel que no va con `no-store`.
 
 ### Gestión de equipos desde el panel
 
@@ -575,13 +936,18 @@ Tres decisiones que conviene conocer:
   se mueve con `git mv`. Si no, el siguiente respaldo crearía uno nuevo y el
   histórico del equipo quedaría partido en dos justo donde interesa seguirlo. Si
   el movimiento falla, el panel lo dice en el aviso y en el log en vez de
-  dejarlo pasar. **Cambiar el grupo ya no mueve nada**: no entra en la ruta.
+  dejarlo pasar. **Cambiar el grupo no mueve nada**: no entra en la ruta.
 - **La clave del equipo no se manda al navegador.** Al editar aparece vacía, y
   vacía significa "conserva la que ya tiene".
 
 | Opción | Por defecto | Qué hace |
 |---|---|---|
 | `editar_inventario` | `true` | En `false` el panel vuelve a ser de **solo lectura**: sin altas, sin bajas, sin importación (403), y el inventario se toca únicamente por archivo. |
+
+Son dos condiciones distintas y los mensajes las distinguen: que el panel lo
+permita (configuración) y que la cuenta tenga el permiso. "No tienes permiso"
+cuando en realidad está apagado para todo el mundo manda a buscar el problema al
+sitio equivocado.
 
 Las escrituras van con candado: `inventory.guardar` es atómico, pero dos altas
 simultáneas leerían la misma lista y la segunda se llevaría por delante a la
@@ -623,10 +989,11 @@ plantilla y acepta subirla llena:
   volver a subirla.
 
 `openpyxl` es una dependencia **opcional** (viene comentada en
-`requirements.txt`). Sin ella el servicio de respaldo funciona exactamente
-igual y el panel simplemente ofrece solo CSV, diciéndolo en pantalla: un
-respaldo desatendido de madrugada no puede quedarse sin correr porque falte una
-librería que solo sirve para leer una hoja de cálculo desde el navegador.
+`requirements.txt`; el instalador la añade si puede). Sin ella el servicio de
+respaldo funciona exactamente igual y el panel simplemente ofrece solo CSV,
+diciéndolo en pantalla: un respaldo desatendido de madrugada no puede quedarse
+sin correr porque falte una librería que solo sirve para leer una hoja de
+cálculo desde el navegador.
 
 **Solo la columna `ip` es obligatoria.** El nombre puede ir vacío (se le
 pregunta al router, ver arriba), y el puerto y el grupo tienen valor por
@@ -647,10 +1014,12 @@ a su manera:
 
 La comparación ignora mayúsculas, tildes, guiones bajos y espacios sobrantes:
 `Dirección IP`, `DIRECCION_IP` y `direccion ip ` son la misma columna. Las
-columnas que no se entienden se ignoran y se avisa de cuáles.
+columnas que no se entienden se ignoran y se avisa de cuáles; una repetida
+(`ip` y `host` a la vez) también se avisa y se usa la primera.
 
-Las filas se validan **una a una con las mismas reglas del formulario**, y el
-CSV se reescribe una sola vez al final. **Reimportar el mismo archivo no
+Las filas se validan **una a una con las mismas reglas del formulario** —
+incluido el alcance: no se puede importar a una empresa que no se puede editar —
+y el CSV se reescribe una sola vez al final. **Reimportar el mismo archivo no
 duplica nada**: las filas repetidas se rechazan por nombre ya existente y salen
 listadas con su número de fila y el motivo, para poder arreglar solo esas.
 
@@ -663,9 +1032,9 @@ la importación haya terminado.
 
 | Ruta | Qué muestra |
 |---|---|
-| `/cambios` | Los últimos cambios de toda la flota por fecha, con equipo, empresa, commit y líneas +/-. |
+| `/cambios` | Los últimos cambios de la flota por fecha, con equipo, empresa, commit y líneas +/-. Con filtros y selector de columnas. |
 | `/historial?equipo=X` | Las versiones de un equipo, de la más reciente a la más antigua. |
-| `/diferencia` | El diff de una versión concreta. |
+| `/diferencia` | El diff de una versión concreta. Requiere el permiso `diferencias`. |
 
 Es **solo lectura** sobre el repo: `git log` y `git show`, nunca `add` ni
 `commit`. Eso es de `store.py`, que corre en el proceso del respaldo; leer no
@@ -706,26 +1075,46 @@ Ponerlo en `false` es una decisión consciente, no un descuido, y el panel
 **avisa en el log al arrancar** de que va a mostrar las credenciales a
 cualquiera que entre.
 
-### Cada cuánto se respalda, desde el panel
+### Ajustes desde el panel
 
-`/ajustes` cambia el intervalo **general** del programador (`intervalo_minutos`,
-el que heredan los equipos que no traen el suyo) y si se respalda nada más
-arrancar (`al_arrancar`), **sin reiniciar nada y sin reescribir ninguna unidad
-de systemd**. El programador relee los ajustes mientras espera, así que bajar de
-4 horas a 30 minutos surte efecto en el momento y no dentro de 4 horas, que es
-justo cuando alguien está esperando a ver si funcionó.
+`/ajustes` (permiso `ajustes`) cambia tres cosas **sin reiniciar nada y sin
+reescribir ninguna unidad de systemd**:
+
+1. **Cada cuánto se respalda.** El intervalo **general** del programador
+   (`intervalo_minutos`, el que heredan los equipos que no traen el suyo) y si
+   se respalda nada más arrancar (`al_arrancar`). El programador relee los
+   ajustes mientras espera, así que bajar de 4 horas a 30 minutos surte efecto
+   en el momento y no dentro de 4 horas, que es justo cuando alguien está
+   esperando a ver si funcionó.
+2. **Las credenciales SSH generales.** Usuario y clave con los que se entra a
+   cualquier equipo que no traiga las suyas — lo que hay que cambiar cuando se
+   rota la clave de la flota. El usuario no puede quedar vacío; la clave vacía
+   significa "no la toques", porque guardar la cadena vacía dejaría a la flota
+   entera sin credencial. La clave **no se manda al navegador ni para rellenar
+   el campo**, pero sí se dice si hay alguna puesta: un campo vacío sin más no
+   distingue "no la toques" de "no hay ninguna".
+3. **El fondo de la pantalla de entrada** (ver arriba).
 
 Lo que se cambia en el panel **no se escribe en el YAML**: va a
 `almacen.ajustes` (`/root/mkbackup/ajustes.json` por defecto) y **manda sobre
-`config.yaml`**. Si cambias el intervalo en el YAML y no ves el efecto, es que
-hay un ajuste guardado desde el panel.
+`config.yaml`**. Si cambias algo en el YAML y no ves el efecto, es que hay un
+ajuste guardado desde el panel.
 
-Va en un archivo aparte porque `config.yaml` está lleno de comentarios y lleva
-las credenciales SSH generales de la flota: un volcado automático se comería los
-comentarios, y un panel comprometido que pudiera reescribirlo se llevaría el
-usuario SSH o apuntaría los respaldos a otro sitio. Lo que el panel puede tocar
-es una **lista blanca de dos claves** (`AJUSTES_EDITABLES`), y todo lo demás
-sigue siendo de archivo.
+**Por qué un archivo aparte y no `config.yaml`:** las dos unidades corren con
+`ProtectSystem=strict`, y `config.yaml` es un archivo que **edita una persona
+con root**. Está lleno de comentarios que un volcado automático se comería, y
+lleva las rutas del repositorio, el remoto de replicación y los parámetros del
+propio panel. Darle permiso de escritura sobre él al proceso que atiende
+peticiones HTTP sería darle la capacidad de apuntar los respaldos a otro sitio.
+Lo que el panel puede tocar es una **lista blanca de cinco claves**
+(`AJUSTES_EDITABLES` en `config.py`), y todo lo demás sigue siendo de archivo.
+
+Las credenciales SSH **sí** están en esa lista, y el precio hay que decirlo
+claro: **quien entre al panel como administrador puede cambiar con qué
+credenciales se entra a los routers.** Se aceptó porque pedir un root y un
+editor para rotar la clave de la flota llevaba a que no se rotara nunca. El
+archivo de ajustes se escribe con `0600` por eso mismo, y el cambio queda en la
+auditoría — el usuario sí, la clave nunca.
 
 Tres detalles del programador que se notan con flotas grandes:
 
@@ -744,22 +1133,46 @@ Tres detalles del programador que se notan con flotas grandes:
   seguido que se pueda" con una pausa mínima entre ciclos, y queda avisado en el
   log de que el intervalo configurado no da para la flota que hay.
 
+### Las fechas van en hora de Ecuador
+
+Las marcas de tiempo se **guardan siempre en UTC** —una hora local dentro de un
+archivo es una bomba de relojería el día que el servidor cambie de zona— y solo
+se convierten **al mostrarlas**. La zona se configura con `zona_horaria` en
+`config.yaml`, por defecto `America/Guayaquil`.
+
+Si la base IANA no está disponible (Windows sin `tzdata`), para
+`America/Guayaquil` se usa un desfase fijo de −5, que es exacto todo el año
+porque Ecuador no tiene horario de verano. Para cualquier otra zona eso sería
+mentir, así que ahí se avisa en el log y las fechas se quedan en UTC.
+
+### Cómo sabe distinguir "corriendo" de "se murió a medias"
+
+Mientras la ejecución vive, refresca un **latido** cada 5 segundos en
+`estado.json`. Si el archivo dice que no terminó pero el latido lleva más de
+40 segundos parado, el proceso se cortó — `kill`, OOM, corte de luz — y el
+panel lo reporta como **INTERRUMPIDA**.
+
+Sin eso, una ejecución muerta se quedaría "en curso" para siempre, que es la
+forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
+
 ### Lo que el panel no hace, a propósito
 
 - **No lanza respaldos.** Un botón "respaldar ahora" convierte una página de
   consulta en algo que toca 300 equipos de golpe. El disparo es del programador;
   desde aquí solo se cambia cada cuánto.
-- **No edita las credenciales generales ni las rutas.** Eso vive en
-  `config.yaml`, que se toca a mano con un editor. El panel escribe únicamente
-  el inventario —incluidas las credenciales **por equipo**— y el archivo de
-  ajustes, los dos bajo `/root/mkbackup`.
+- **No restaura equipos.** Ni el `.rsc` ni el `.backup`. Eso es a mano, con la
+  cabeza puesta y mirando la versión de RouterOS.
+- **No edita las rutas ni la configuración general.** Solo la lista blanca de
+  `AJUSTES_EDITABLES`. Las rutas del repositorio, el remoto de replicación y
+  Telegram viven en `config.yaml`, que se toca con un editor y con root. El
+  panel escribe únicamente bajo `/root/mkbackup`: el inventario, los ajustes,
+  las cuentas, la auditoría y la imagen de fondo del login.
 - **No enseña los secretos de las configuraciones.** El diff los tapa (ver
   arriba). Se ve qué cambió, no lo que dice.
-- **No gestiona usuarios.** Un usuario y una clave, cambiados a mano en el YAML.
-  Ni altas, ni roles, ni recuperación por correo: para un panel de operaciones,
-  eso es infraestructura que hay que mantener y que puede fallar sola.
-- **No tiene API REST.** Hay un `/api/estado` con el mismo JSON que pinta la
-  pantalla de estado, y nada más.
+- **No tiene HTTPS propio, ni API REST, ni 2FA, ni recuperación de clave por
+  correo.** Hay un `/api/estado` con el mismo JSON que pinta la pantalla de
+  estado, y nada más. Una clave olvidada se arregla desde el panel por otro
+  administrador, o con `--clave-usuario`.
 
 ### Antes de exponerlo
 
@@ -773,13 +1186,18 @@ propio panel avisa en el log si lo arrancas escuchando fuera de localhost.
 La cookie va sin `Secure` a propósito, porque sobre HTTP el navegador la
 descartaría; si montas el proxy TLS, ese es el sitio donde añadirlo.
 
+Las respuestas llevan `Content-Security-Policy: default-src 'self'
+'unsafe-inline'`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` y
+`Referrer-Policy: same-origin`. El panel no carga nada de fuera: ni fuentes, ni
+CDN, ni librerías de gráficas.
+
 `/salud` responde `ok` **sin sesión, y es deliberado**: es la ruta que mira un
 monitor externo para saber que el proceso vive, y pedirle credenciales obligaría
 a repartir la clave del panel por cada sistema de monitoreo. No revela nada de la
-flota. Todo lo demás exige sesión: `/` redirige al formulario y `/api/estado`
-—el JSON crudo, si prefieres consumirlo desde otro sitio— responde **401** para
-que un script sepa que le falta login en vez de tragarse el HTML del login como
-si fuera el estado.
+flota. `/fondo` también es abierta, por necesidad (ver arriba). Todo lo demás
+exige sesión: `/` redirige al formulario y `/api/estado` —el JSON crudo, si
+prefieres consumirlo desde otro sitio— responde **401** para que un script sepa
+que le falta login en vez de tragarse el HTML del login como si fuera el estado.
 
 ---
 
@@ -809,21 +1227,24 @@ ilegible, y un mirror que no se puede descifrar no es un respaldo.
 `mkbackup` nació para cubrir lo que Oxidized no hace: el **backup binario**.
 
 En lo demás se parecen más de lo que se parecían: aquí también se navegan las
-versiones de cada equipo y se leen los diffs desde el navegador, sin abrir una
-consola.
+versiones de cada equipo y se leen los diffs desde el navegador, y también hay
+cuentas y roles.
 
 Lo que Oxidized tiene y esto no:
 
 - **Decenas de fabricantes.** Aquí solo hay RouterOS, y todo — el parseo, la
   limpieza del ruido, la identidad del equipo — está escrito para él.
-- **Usuarios y roles.** Aquí hay un usuario y una clave, y punto.
 - **API REST y hooks.** Aquí solo `/api/estado` y Telegram.
 - **Años de casos raros ya resueltos**, y no lo mantienes tú.
 
-Lo que hay aquí y no allí, además del binario: el **enmascarado de secretos** en
-el diff. Con `show-sensitive` activado, publicar configuraciones por HTTP es
-publicar las credenciales de la red; aquí se tapan los valores y se sigue viendo
-qué línea cambió.
+Lo que hay aquí y no allí, además del binario:
+
+- El **enmascarado de secretos** en el diff. Con `show-sensitive` activado,
+  publicar configuraciones por HTTP es publicar las credenciales de la red;
+  aquí se tapan los valores y se sigue viendo qué línea cambió.
+- El **alcance por empresa**, pensado para un ISP que administra los equipos de
+  varios clientes en el mismo panel, con el 404 en vez del 403 y con los totales
+  y las gráficas recortados.
 
 Para buscar dentro de las configuraciones sigue estando `git grep`, que con 300
 equipos es más rápido que cualquier buscador que le pongas encima.
@@ -844,13 +1265,35 @@ mkbackup/
 ├── store.py        git para el texto, disco con retención para el binario
 ├── historial.py    Lectura del historial de git y enmascarado de secretos
 ├── estado.py       Avance de la ejecución en JSON, con latido
-├── sesion.py       Login del panel: hash de la clave y sesiones en memoria
+├── hechos.py       Modelo, versión y último respaldo bueno de cada equipo
+├── sesion.py       Hash de la clave y sesiones en memoria
+├── usuarios.py     Cuentas, roles, permisos y alcance por empresa
+├── auditoria.py    Quién entró, quién lo intentó y quién tocó qué
 ├── web.py          Rutas del panel: lo que se decide en cada petición
 ├── paginas.py      HTML del panel: lo que se ve en cada petición
-├── planificador.py Bucle residente: a que equipos les toca y cuando
+├── planificador.py Bucle residente: a qué equipos les toca y cuándo
 ├── notify.py       Telegram
 └── cli.py          Orquestación: paralelo para SSH, serie para git
 ```
+
+No hay más: ni carpeta de plantillas, ni de estáticos, ni framework. El panel es
+`http.server` de la librería estándar, el HTML se genera en `paginas.py` y las
+únicas dependencias son `paramiko` y `PyYAML` (más `openpyxl`, opcional, para el
+`.xlsx`).
+
+Los archivos de datos, todos bajo `/root/mkbackup`:
+
+| Archivo | Qué guarda | Quién lo escribe |
+|---|---|---|
+| `configs.git/` | Los `.rsc` versionados | el respaldo |
+| `binarios/` | Los `.backup`, con retención | el respaldo |
+| `inventory.csv` | La flota | los dos |
+| `estado.json` | El ciclo en curso, con latido | el respaldo |
+| `programador.json` | Cuándo se consultó cada equipo | el programador |
+| `equipos.json` | Modelo, versión y último respaldo bueno | el respaldo |
+| `ajustes.json` | Lo que se cambia desde el panel | el panel |
+| `usuarios.json` | Cuentas, roles y hashes | el panel |
+| `auditoria.log` | Un evento por línea | el panel |
 
 Detalle de concurrencia: los equipos se consultan **en paralelo** (lo lento es
 la red) pero se guardan **en serie**, porque git no admite dos escrituras
@@ -867,9 +1310,11 @@ python -m tests.test_sesion       # hash de la clave, caducidad, bloqueo por IP
 python -m tests.test_historial    # log, diffs y enmascarado de secretos
 python -m tests.test_importar     # cabeceras, sinonimos, csv y xlsx
 python -m tests.test_planificador # intervalos, descuento del ciclo, pausa minima
+python -m tests.test_usuarios     # roles, permisos, alcance y la invariante
+python -m tests.test_hechos       # modelo, version, ultimo ok y dato vacio
 ```
 
-**542 comprobaciones** entre los siete archivos, todas en verde hoy. No
+**857 comprobaciones** entre los nueve archivos, todas en verde hoy. No
 requieren ningún equipo ni red.
 
 | Módulo | Comprobaciones |
@@ -877,10 +1322,12 @@ requieren ningún equipo ni red.
 | `test_limpieza` | 73 |
 | `test_almacen` | 41 |
 | `test_estado` | 35 |
-| `test_sesion` | 58 |
+| `test_sesion` | 76 |
 | `test_historial` | 161 |
 | `test_importar` | 95 |
 | `test_planificador` | 79 |
+| `test_usuarios` | 259 |
+| `test_hechos` | 38 |
 
 ### Probar el flujo completo sin hardware
 

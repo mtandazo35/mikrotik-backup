@@ -12,7 +12,10 @@ Type=simple
 # proxy con TLS si hace falta verlo desde otra maquina.
 User=root
 Group=root
-WorkingDirectory=/root/mkbackup
+# El codigo vive en app/ y los datos en la carpeta de arriba. Separados a
+# proposito: con el repositorio y los respaldos mezclados, un `git clean`
+# de alguien depurando se lleva los backups por delante.
+WorkingDirectory=/root/mkbackup/app
 ExecStart=/root/mkbackup/.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --web
 
 NoNewPrivileges=true

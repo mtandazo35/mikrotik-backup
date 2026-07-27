@@ -21,7 +21,10 @@ Type=simple
 # la carpeta a /var/lib/mkbackup y cambiar User=, Group= y ReadWritePaths=.
 User=root
 Group=root
-WorkingDirectory=/root/mkbackup
+# El codigo vive en app/ y los datos en la carpeta de arriba. Separados a
+# proposito: con el repositorio y los respaldos mezclados, un `git clean`
+# de alguien depurando se lleva los backups por delante.
+WorkingDirectory=/root/mkbackup/app
 ExecStart=/root/mkbackup/.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --planificador
 
 # Si el programador se cae (bug, OOM), sin esto la flota se queda sin
