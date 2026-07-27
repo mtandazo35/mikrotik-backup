@@ -182,6 +182,9 @@ web:
   # Cuantos eventos se ensenan por pagina en el registro de auditoria.
   eventos_por_pagina: 30
 
+  # Cambios por pagina en la pantalla de Cambios.
+  cambios_por_pagina: 10
+
   # Freno a la fuerza bruta: tras N fallos, esa IP espera bloqueo_segundos.
   intentos_max: 5
   bloqueo_segundos: 300

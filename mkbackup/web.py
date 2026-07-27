@@ -1076,11 +1076,18 @@ class Manejador(BaseHTTPRequestHandler):
             return equipos
         return sorted(equipos, key=CLAVES_ORDEN[columna], reverse=descendente)
 
+    # Cuantos commits se leen del repositorio para armar la lista de Cambios.
+    # No es lo mismo que cuantos se ENSENAN (eso es cambios_por_pagina): de este
+    # monton se descuenta lo que no se puede ver y lo que no pasa el filtro, y
+    # lo que queda se pagina. Alto para que haya varias paginas que recorrer,
+    # acotado porque cada commit es trabajo de git y esto se pide en cada carga.
+    CAMBIOS_LEIDOS = 500
+
     def _cambios(self) -> None:
         equipos, _ = self._inventario_visible()
         filtro = self._filtro()
         por_ruta = {e.ruta_relativa: e for e in equipos}
-        lista = hist.cambios(self.cfg.almacen.git, self.cfg.web.historial_maximo)
+        lista = hist.cambios(self.cfg.almacen.git, self.CAMBIOS_LEIDOS)
 
         # Un equipo dado de baja ya no esta en el inventario, asi que no se le
         # puede calcular el alcance. Solo lo ve quien lo ve todo; para los
@@ -1094,9 +1101,24 @@ class Manejador(BaseHTTPRequestHandler):
                 if ruta in por_ruta and self._coincide(por_ruta[ruta], filtro)
             ]
 
+        # La pagina que se pide. Viene de la URL, asi que puede traer cualquier
+        # cosa: una letra ahi no puede ser un error, se empieza por el principio.
+        try:
+            desde = max(0, int(self._consulta().get("desde", "0")))
+        except ValueError:
+            desde = 0
+        total = len(lista)
+        por_pagina = self.cfg.web.cambios_por_pagina
+        # Si se pide una pagina que ya no existe (se filtro despues de avanzar),
+        # se vuelve a la ultima con contenido en vez de ensenar una tabla vacia.
+        if desde >= total:
+            desde = max(0, (max(0, total - 1) // por_pagina) * por_pagina)
+        pagina = lista[desde:desde + por_pagina]
+
         self._html(
             paginas.cambios(
-                lista, self.cfg.web.ver_diferencias, zona=self.ctx.zona,
+                pagina, self.cfg.web.ver_diferencias, zona=self.ctx.zona,
+                desde=desde, total=total, por_pagina=por_pagina,
                 por_ruta=por_ruta, empresas=self._valores(equipos, "empresa"),
                 grupos=self._valores(equipos, "grupo"), filtro=filtro,
                 sesion=self._para_pintar(self.usuario),

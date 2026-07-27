@@ -349,6 +349,53 @@ def main() -> None:
     comprobar(f"ninguna leyenda comparte id con otra {ids}",
               len(ids) == len(set(ids)))
 
+    # --- Paginacion de Cambios ---------------------------------------------
+    # Se pidio de 10 en 10. Lo que hay que comprobar de un paginador no es que
+    # pinte los botones, es que no PIERDA filas por el camino y que conserve
+    # el filtro: si cambiar de pagina deshace el filtro, cada vez que avanzas
+    # vuelves a tener la flota entera delante.
+    from types import SimpleNamespace as NS
+
+    print()
+    todos = [(f"acme/bts/Eq-{i % 5}.rsc",
+              NS(commit=f"c{i:04d}", fecha="2026-07-27T10:00:00+00:00",
+                 mensaje=f"Cambio {i}", lineas_mas=i, lineas_menos=1, ruta=""))
+             for i in range(47)]
+
+    vistos, paginas_recorridas, desde = set(), 0, 0
+    while desde < len(todos) and paginas_recorridas < 20:
+        trozo = todos[desde:desde + 10]
+        html_p = pg.cambios(trozo, True, total=len(todos), desde=desde,
+                            por_pagina=10, filtro={"empresa": "Andinanet"},
+                            sesion=SESION)
+        cuerpo = re.sub(r"<style.*?</style>", "", html_p, flags=re.S)
+        comprobar(f"la pagina que empieza en {desde} trae 10 o menos filas",
+                  len(re.findall(r"<tr>", cuerpo)) - 1 <= 10)
+        comprobar(f"y conserva el filtro en sus enlaces (desde={desde})",
+                  "empresa=Andinanet" in cuerpo)
+        # Se identifican por el commit del ENLACE y no por la columna
+        # "version": esa columna no esta entre las visibles por defecto, asi
+        # que buscarla ahi contaba cero y la prueba fallaba por como estaba
+        # escrita, no por lo que pasa.
+        for c in re.findall(r"commit=(c\d{4})", cuerpo):
+            vistos.add(c)
+        desde += 10
+        paginas_recorridas += 1
+
+    comprobar(f"recorriendo las paginas se ven TODOS los cambios "
+              f"({len(vistos)} de {len(todos)})", len(vistos) == len(todos))
+    comprobar(f"en 5 paginas de 10 para 47 cambios ({paginas_recorridas})",
+              paginas_recorridas == 5)
+
+    # Con pocos no se ensena un paginador de una sola pagina.
+    corto = re.sub(r"<style.*?</style>", "",
+                   pg.cambios(todos[:4], True, total=4, desde=0, por_pagina=10,
+                              sesion=SESION), flags=re.S)
+    comprobar("con 4 cambios no aparece el paginador",
+              "Siguientes" not in corto and "Anteriores" not in corto)
+    comprobar("pero el titulo sigue diciendo cuantos hay",
+              "Cambios 1 a 4 de 4" in corto)
+
     ejecutar_graficas()
 
     print()

@@ -141,6 +141,8 @@ class ConfigWeb:
     historial_maximo: int = 50
     # Eventos por pagina en el registro de auditoria.
     eventos_por_pagina: int = 30
+    # Cambios por pagina en la pantalla de Cambios.
+    cambios_por_pagina: int = 10
 
     # Imagen de fondo de la pantalla de entrada. Ruta a un archivo del disco;
     # vacio = sin fondo. La sirve el propio panel en /fondo, porque su politica
@@ -430,6 +432,8 @@ class Config:
             raise ErrorConfig("web.historial_maximo debe ser al menos 1")
         if self.web.eventos_por_pagina < 1:
             raise ErrorConfig("web.eventos_por_pagina debe ser al menos 1")
+        if self.web.cambios_por_pagina < 1:
+            raise ErrorConfig("web.cambios_por_pagina debe ser al menos 1")
 
         # Del YAML llega una lista (o una cadena suelta, si alguien puso una
         # sola direccion sin guiones). Se normaliza a un frozenset porque se

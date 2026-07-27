@@ -1601,6 +1601,45 @@ def importar(hay_xlsx: bool, resultado: dict | None = None, error: str = "",
 # --- Cambios e historial ----------------------------------------------------
 
 
+def paginador(ruta: str, desde: int, total: int, por_pagina: int,
+              filtro=None, claves=()) -> str:
+    """Los botones de Anteriores/Siguientes. "" si todo cabe en una pagina.
+
+    Se comparte entre Auditoria y Cambios: dos paginadores copiados acaban
+    comportandose distinto en cuanto alguien arregla uno de los dos.
+
+    Los filtros viajan en el enlace a proposito: cambiar de pagina no puede
+    deshacer lo que acabas de filtrar, o cada vez que avanzas pierdes la
+    busqueda.
+    """
+    if total <= por_pagina:
+        return ""
+
+    filtro = filtro or {}
+
+    def enlace(inicio):
+        partes = [("desde", str(inicio))]
+        for clave in claves:
+            if filtro.get(clave):
+                partes.append((clave, filtro[clave]))
+        return f"{ruta}?" + urlencode(partes)
+
+    pagina = desde // por_pagina + 1
+    ultimas = max(1, -(-total // por_pagina))   # division hacia arriba
+    anterior = (
+        f'<a class="boton secundario mini" href="{enlace(max(0, desde - por_pagina))}">Anteriores</a>'
+        if desde > 0 else
+        '<span class="boton secundario mini apagado-boton">Anteriores</span>'
+    )
+    siguiente = (
+        f'<a class="boton secundario mini" href="{enlace(desde + por_pagina)}">Siguientes</a>'
+        if desde + por_pagina < total else
+        '<span class="boton secundario mini apagado-boton">Siguientes</span>'
+    )
+    return (f'<div class="paginador">{anterior}'
+            f'<span class="sub">Pagina {pagina} de {ultimas}</span>{siguiente}</div>')
+
+
 def cambios(
     lista,
     hay_diferencias: bool,
@@ -1611,8 +1650,15 @@ def cambios(
     filtro=None,
     sesion=None,
     columnas=(),
+    desde: int = 0,
+    total: int = 0,
+    por_pagina: int = 10,
 ) -> str:
     """`lista` son pares (ruta_relativa, Version) mas recientes primero.
+
+    `lista` viene YA recortada a la pagina que toca; `total` es cuantos hay en
+    total tras filtrar, que es lo que necesita el paginador para saber cuantas
+    paginas hay.
 
     `por_ruta` mapea ruta del repo -> Equipo del inventario. Sirve para dos
     cosas: ensenar el nombre legible de la empresa en vez del de su carpeta
@@ -1667,6 +1713,20 @@ def cambios(
             + "</td></tr>"
         )
 
+    # Los filtros y las columnas elegidas viajan en el enlace de la pagina
+    # siguiente: sin eso, avanzar de pagina deshace el filtro que se acaba de
+    # poner y devuelve la flota entera.
+    barra_paginas = paginador(
+        "/cambios", desde, total, por_pagina, filtro,
+        ("empresa", "grupo", "q", "col"),
+    )
+    desde_uno = desde + 1 if total else 0
+    hasta = min(desde + por_pagina, total)
+    titulo_tabla = (
+        f"Cambios {desde_uno} a {hasta} de {total}" if total
+        else "Ultimos cambios de la flota"
+    )
+
     cuerpo = f"""
   {filtros("/cambios", empresas, grupos, filtro)}
   <div class="barra-acciones">
@@ -1674,13 +1734,14 @@ def cambios(
     {selector_columnas("/cambios", COLUMNAS_CAMBIOS, visibles, filtro)}
   </div>
   <div class="tarjeta">
-    <h2>Ultimos cambios de la flota</h2>
+    <h2>{titulo_tabla}</h2>
     <div class="tabla-caja">
       <table>
         <thead><tr>{cabeceras}</tr></thead>
         <tbody>{"".join(filas)}</tbody>
       </table>
     </div>
+    {barra_paginas}
   </div>
 """
     return envoltura("mkbackup - cambios", cuerpo, sesion, activo="cambios")
@@ -2403,34 +2464,10 @@ def auditoria(eventos, usuarios_vistos, filtro: dict, sesion=None, zona=None,
             '<tr><td colspan="5" class="vacio">No hay eventos que coincidan.</td></tr>'
         )
 
-    # El paginador conserva los filtros: cambiar de pagina no puede deshacer
-    # lo que acabas de filtrar, o cada vez que avanzas pierdes la busqueda.
-    def enlace(inicio):
-        partes = [("desde", str(inicio))]
-        for clave in ("evento", "usuario", "sospechosos"):
-            if filtro.get(clave):
-                partes.append((clave, filtro[clave]))
-        return "/auditoria?" + urlencode(partes)
-
-    pagina = desde // por_pagina + 1
-    paginas = max(1, -(-total // por_pagina))   # division hacia arriba
-    if total > por_pagina:
-        anterior = (
-            f'<a class="boton secundario mini" href="{enlace(max(0, desde - por_pagina))}">Anteriores</a>'
-            if desde > 0 else
-            '<span class="boton secundario mini apagado-boton">Anteriores</span>'
-        )
-        siguiente = (
-            f'<a class="boton secundario mini" href="{enlace(desde + por_pagina)}">Siguientes</a>'
-            if desde + por_pagina < total else
-            '<span class="boton secundario mini apagado-boton">Siguientes</span>'
-        )
-        paginador = (
-            f'<div class="paginador">{anterior}'
-            f'<span class="sub">Pagina {pagina} de {paginas}</span>{siguiente}</div>'
-        )
-    else:
-        paginador = ""
+    barra_paginas = paginador(
+        "/auditoria", desde, total, por_pagina, filtro,
+        ("evento", "usuario", "sospechosos"),
+    )
 
     desde_uno = desde + 1 if total else 0
     hasta = min(desde + por_pagina, total)
@@ -2482,7 +2519,7 @@ def auditoria(eventos, usuarios_vistos, filtro: dict, sesion=None, zona=None,
         <tbody>{"".join(filas)}</tbody>
       </table>
     </div>
-    {paginador}
+    {barra_paginas}
     <p class="pista">Se guardan los ultimos eventos hasta 5 MB, y despues se
        conserva una generacion anterior del archivo. Aqui nunca se escribe una
        clave: de un cambio de credenciales solo queda que se cambio y quien.</p>
