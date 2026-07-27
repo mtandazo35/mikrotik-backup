@@ -1369,6 +1369,13 @@ class Manejador(BaseHTTPRequestHandler):
             # llego en el formulario: asi no hay forma de colar una empresa
             # por un camino distinto al que se comprueba.
             if not errores and not self._edita(equipo):
+                # Se audita: alguien tanteando los limites del vecino no puede
+                # ser invisible. El intento por NOMBRE ya se registraba; este,
+                # por empresa, no dejaba ni una linea.
+                self._anotar(
+                    "fuera_de_alcance",
+                    f"intento crear {equipo.nombre} en '{equipo.empresa}'",
+                )
                 errores = [f"No puedes crear equipos en '{equipo.empresa}'."]
             if errores:
                 self._html(paginas.formulario_equipo(
@@ -1414,6 +1421,10 @@ class Manejador(BaseHTTPRequestHandler):
             # meterlo en otro: hay que poder escribir en los dos lados, o
             # seria una forma de regalarle un equipo a alguien (o de robarselo).
             if not errores and not self._edita(equipo):
+                self._anotar(
+                    "fuera_de_alcance",
+                    f"intento mover {antiguo.nombre} a '{equipo.empresa}'",
+                )
                 errores = [f"No puedes mover este equipo a '{equipo.empresa}'."]
             if errores:
                 self._html(paginas.formulario_equipo(
@@ -1428,6 +1439,13 @@ class Manejador(BaseHTTPRequestHandler):
         # Si cambio el nombre, la empresa o el grupo, cambia la ruta dentro del
         # repo. Hay que mover el archivo con git: si no, el proximo respaldo
         # crearia uno nuevo y el historico del equipo quedaria partido en dos.
+        if antiguo.nombre != equipo.nombre:
+            # Lo observado (modelo, version, ultimo respaldo) esta indexado por
+            # el nombre: sin esto el equipo aparece como recien dado de alta y
+            # no se arregla hasta el siguiente ciclo bueno, que pueden ser
+            # horas, y ademas sin la marca de "fallando" que hiciera sospechar.
+            self.ctx.hechos.renombrar(antiguo.nombre, equipo.nombre)
+
         if antiguo.ruta_relativa != equipo.ruta_relativa:
             if Almacen(self.cfg).renombrar(
                 antiguo.ruta_relativa, equipo.ruta_relativa
@@ -1504,7 +1522,17 @@ class Manejador(BaseHTTPRequestHandler):
             "grupo": campos.get("grupo", ""),
             "existentes": ocupados,
             "original": original,
-            "intervalo": campos.get("intervalo", ""),
+            # Dos nombres para lo mismo: el formulario manda "intervalo" y el
+            # importador de Excel manda "intervalo_minutos", que es como se
+            # llama la columna. Se aceptan los dos porque este metodo sirve a
+            # los dos caminos.
+            #
+            # Esto estuvo roto y no dio la cara: al no encontrar la clave se
+            # leia cadena vacia, que es un valor VALIDO ("usa el general"), asi
+            # que cada equipo importado perdia su intervalo en silencio y el
+            # panel mostraba "general" como si asi se hubiera pedido. Un fallo
+            # que devuelve un valor por defecto plausible no se nota nunca.
+            "intervalo": campos.get("intervalo") or campos.get("intervalo_minutos", ""),
             "usuario": campos.get("usuario", ""),
             "clave": clave,
         }
