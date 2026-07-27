@@ -14,3 +14,8 @@ venv/
 
 # Estado del simulador de pruebas
 tests/.dns_simulado
+
+# Cosas propias del despliegue que no son del proyecto: la imagen de fondo del
+# login, notas, pruebas. El panel la sirve desde donde diga web.fondo_login,
+# asi que no tiene por que vivir en el repositorio.
+/local/
