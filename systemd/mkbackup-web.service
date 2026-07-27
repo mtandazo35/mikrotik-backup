@@ -1,0 +1,47 @@
+[Unit]
+Description=Panel web de mkbackup
+After=network.target
+
+[Service]
+Type=simple
+
+# Corre como root porque todo vive bajo /root (ver el mismo comentario en
+# mkbackup.service). Aqui pesa mas que en el programador: esto es lo unico del
+# sistema que escucha en un puerto, o sea la unica superficie que se puede
+# atacar desde fuera. Dejalo en 127.0.0.1 (web.direccion) y ponle delante un
+# proxy con TLS si hace falta verlo desde otra maquina.
+User=root
+Group=root
+WorkingDirectory=/root/mkbackup
+ExecStart=/root/mkbackup/.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --web
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# ProtectHome=true dejaria /root inaccesible, y ahi vive todo.
+ProtectHome=false
+
+# El panel ya NO es de solo lectura: da de alta equipos, asi que necesita
+# escribir el inventario, y guarda los ajustes que se cambian desde la web.
+# Sigue SIN poder tocar config.yaml (credenciales generales y rutas): eso es
+# a mano y con un editor.
+ReadWritePaths=/root/mkbackup
+
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Necesita salir a la red para preguntarle su nombre a un router al darlo de
+# alta (/system identity). Antes no hablaba con ningun equipo y esto estaba
+# mas cerrado; el alta con nombre automatico es lo que lo cambio.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Es un servicio de consulta: que su caida no arrastre nada, pero que vuelva.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

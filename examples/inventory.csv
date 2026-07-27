@@ -1,0 +1,5 @@
+nombre,empresa,ip,puerto,grupo,intervalo_minutos,usuario,clave
+Router-Core-Matriz,Andinanet Telecomunicaciones,10.20.0.1,22,core,60,,
+BTS-Norte-01,Andinanet Telecomunicaciones,10.20.30.11,22,bts,,,
+BTS-Sur-02,Andinanet Telecomunicaciones,10.20.30.12,2288,bts,,,
+CCR-Borde-Quito,Fibra Austral S.A.,192.168.88.1,,quito,1440,usuario-de-ejemplo,cambiame

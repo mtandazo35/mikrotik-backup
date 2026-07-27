@@ -1,0 +1,161 @@
+# Configuracion de mkbackup. Copiar a config.yaml y ajustar.
+# config.yaml esta en .gitignore porque lleva credenciales.
+
+# El inventario ya no es de solo lectura: lo reescriben el panel (altas y
+# ediciones) y el renombrado automatico de los equipos dados de alta sin
+# nombre. En un despliegue con systemd tiene que estar en una ruta que los dos
+# servicios puedan ESCRIBIR (ProtectSystem=strict deja /opt en solo lectura):
+# lo natural es /root/mkbackup/inventory.csv, junto al resto de los datos.
+# OJO: el inventario puede llevar el usuario y la clave SSH de cada equipo en
+# claro (columnas usuario/clave, opcionales). Por eso vive en /root, que es
+# 0700, y mkbackup lo escribe con permisos 0600. Trata cualquier copia de ese
+# archivo como tratarias las credenciales de la red, porque eso es.
+inventario: /root/mkbackup/inventory.csv
+
+# Solo afecta a como se MUESTRAN las fechas en el panel. Lo que se guarda en
+# disco es siempre UTC: una hora local dentro de un archivo es una bomba de
+# relojeria el dia que el servidor cambie de zona.
+zona_horaria: America/Guayaquil
+
+# Equipos consultados a la vez. 15 es conservador y va bien para ~300 MikroTik
+# sobre enlaces WAN. Subirlo satura enlaces y CPU del servidor antes que ganar
+# tiempo: el cuello de botella es la latencia de cada equipo, no el paralelismo.
+concurrencia: 15
+
+reintentos: 3
+espera_reintento: 10          # segundos, se multiplica por el numero de intento
+
+ssh:
+  # Credenciales GENERALES: las que se usan con cualquier equipo que no traiga
+  # las suyas en el inventario. Un equipo con usuario/clave propios manda sobre
+  # esto, campo a campo (puede traer solo el usuario y heredar la clave).
+  usuario: Respaldo
+  # Usar clave privada o password. La clave es preferible: no viaja el secreto
+  # y se revoca por equipo.
+  password: ""
+  clave_privada: /root/mkbackup/.ssh/id_mkbackup
+  puerto_defecto: 22
+  timeout: 60
+  # aceptar: confia en la host key la primera vez (comodo en despliegue inicial)
+  # rechazar: exige que ya este en known_hosts (mas seguro en produccion)
+  host_key_desconocida: aceptar
+
+export:
+  # /export show-sensitive incluye passwords PPPoE, PSK de wireless y secrets
+  # de VPN. Requiere que el usuario tenga la policy "sensitive" en el MikroTik.
+  # Si se pone en false, el respaldo NO sirve para restaurar credenciales.
+  mostrar_secretos: true
+  # Una linea por comando: hace los diffs mucho mas legibles.
+  terse: true
+
+backup_binario:
+  # El .backup SI incluye certificados, claves SSH y passwords de usuarios del
+  # sistema, que /export omite. Es lo que permite restaurar un equipo tal cual.
+  activo: true
+  # Cifra el .backup en el propio equipo. Muy recomendable: el archivo lleva
+  # todos los secretos. Vacio = sin cifrar (dont-encrypt=yes).
+  password: ""
+  # Cuantos .backup conservar por equipo.
+  retencion: 5
+  # Generar el binario solo cuando el export en texto detecto un cambio real.
+  # Dejarlo en true evita acumular binarios identicos.
+  solo_si_cambio: true
+
+almacen:
+  # Repo git con los .rsc en texto. Aqui es donde se ve el historial y los diffs.
+  git: /root/mkbackup/configs.git
+  # Los .backup binarios NO van a git (ver README): disco con retencion.
+  binarios: /root/mkbackup/binarios
+  # Avance de la ejecucion en JSON. Lo escribe el respaldo, lo lee el panel web.
+  estado: /root/mkbackup/estado.json
+  # Lo que se cambia desde el panel (por ahora, cada cuanto se respalda). Va
+  # aparte de este archivo a proposito: aqui hay comentarios y credenciales, y
+  # el panel corre sin permiso para escribir en /etc.
+  ajustes: /root/mkbackup/ajustes.json
+  # Cuentas del panel (nombre, rol y hash de la clave). La primera vez se
+  # siembra sola con el usuario que haya en web: de mas abajo, asi que quien
+  # ya tenia el panel funcionando no se queda fuera al actualizar. A partir de
+  # ahi manda este archivo y las claves se cambian desde la propia web.
+  usuarios: /root/mkbackup/usuarios.json
+  # Registro de accesos y de cambios: una linea JSON por evento. Se rota solo
+  # al llegar a 5 MB y conserva una generacion anterior. Nunca guarda claves.
+  auditoria: /root/mkbackup/auditoria.log
+  # Modelo, version de RouterOS y fecha del ultimo respaldo de cada equipo. Lo
+  # escribe el respaldo y lo lee el panel para las columnas de la tabla.
+  hechos: /root/mkbackup/equipos.json
+  # Remoto opcional. Si los respaldos llevan secretos (mostrar_secretos: true),
+  # usar un remoto cifrado — ver la seccion de replicacion del README.
+  remoto: ""
+  autor: mkbackup
+  email: mkbackup@localhost
+
+# Cada cuanto se buscan cambios en la flota. Lo aplica el proceso residente
+# (mkbackup --planificador, que es lo que arranca mkbackup.service): antes esto
+# lo decidia un timer de systemd, y se movio aqui porque el intervalo se cambia
+# desde el panel y reescribir unidades de systemd exigiria darle root.
+planificador:
+  # Minutos entre consultas a un equipo. Es el valor POR DEFECTO de la flota:
+  # cada equipo puede llevar el suyo en la columna intervalo_minutos del
+  # inventario, y cuando ahi hay un numero mayor que cero ese MANDA sobre este.
+  # (0, o la columna vacia, significa "usa este".) Existe porque un router de
+  # sucursal que no se toca en meses no tiene por que preguntarse al mismo
+  # ritmo que un core: preguntar de mas gasta enlace y llena el log de nada.
+  #
+  # Ojo: un ciclo ya no respalda la flota entera, sino solo a los equipos que
+  # les toca; si no le toca a nadie no se lanza ciclo. Si un ciclo llega a
+  # durar mas que el intervalo NO se lanza otro encima (git no admite dos
+  # escrituras a la vez): se avisa en el log y el siguiente arranca tras una
+  # pausa minima.
+  intervalo_minutos: 240
+  # Respaldar nada mas arrancar el servicio, sin esperar el primer intervalo.
+  # Con false, un servidor que se reinicia cada noche podria no respaldar nunca.
+  al_arrancar: true
+  # OJO: estas dos opciones tambien se cambian desde el panel, y lo que se
+  # ponga alli MANDA sobre lo de aqui. El panel no puede escribir en /etc, asi
+  # que guarda su version en almacen.ajustes (un JSON aparte) y el programador
+  # la aplica encima de este archivo en cada vuelta. Si cambias el valor aqui y
+  # no ves el efecto, es que hay un ajuste guardado desde el panel.
+
+# Panel de solo lectura para ver si el respaldo esta corriendo. Se levanta
+# aparte (mkbackup-web.service); el respaldo no lo necesita para funcionar.
+web:
+  # 127.0.0.1 = solo desde el propio servidor (por defecto, y lo mas seguro).
+  # El panel lista nombres e IPs de toda la flota, y aunque pide login, esto
+  # habla HTTP en claro: para verlo desde otra maquina ponlo detras de un
+  # proxy con TLS en vez de abrirlo con 0.0.0.0 y ya.
+  direccion: 127.0.0.1
+  puerto: 8080
+  # Cada cuantos segundos se refresca el navegador.
+  refresco: 3
+
+  # --- Login (obligatorio: sin clave_hash el panel no arranca) -------------
+  usuario: admin
+  # NO es la clave: es su hash. Generalo con
+  #     mkbackup --hash-clave
+  # y pega aqui la linea que imprime. Asi este archivo se puede copiar o
+  # respaldar sin repartir la clave del panel.
+  clave_hash: ""
+  # Cuanto dura la sesion antes de volver a pedir la clave.
+  sesion_horas: 8
+  # Imagen de fondo de la pantalla de entrada (ruta a un archivo del disco).
+  # Vacio = sin fondo. Formatos: jpg, png, webp, avif o svg. Conviene que no
+  # pase de 1-2 MB: se descarga entera antes de que se vea el formulario.
+  # OJO: se sirve SIN pedir login (es el fondo de la propia pantalla de
+  # entrada), asi que cualquiera que llegue al panel puede verla. No pongas ahi
+  # nada que no quieras ensenar.
+  fondo_login: ""
+
+  # Cuantos eventos se ensenan por pagina en el registro de auditoria.
+  eventos_por_pagina: 30
+
+  # Freno a la fuerza bruta: tras N fallos, esa IP espera bloqueo_segundos.
+  intentos_max: 5
+  bloqueo_segundos: 300
+
+telegram:
+  token: ""
+  chat_id: ""
+  # resumen: un mensaje por ciclo (recomendado con muchos equipos)
+  # detalle: un mensaje por cada fallo y cada cambio
+  # ninguno: sin notificaciones
+  modo: resumen

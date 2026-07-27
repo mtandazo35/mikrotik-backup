@@ -1,0 +1,58 @@
+[Unit]
+Description=Respaldo de configuraciones MikroTik (programador residente)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Antes era Type=oneshot disparado por mkbackup.timer. Ahora el proceso vive
+# siempre y decide el el momento de cada ciclo, porque el intervalo se
+# configura desde el panel web: si lo siguiera mandando el timer, el panel
+# tendria que reescribir esta unidad y hacer `systemctl daemon-reload`, y para
+# eso habria que darle root a un panel de consulta.
+Type=simple
+
+# Todo vive bajo /root, que es lo que se pidio para este despliegue en Debian.
+# Eso obliga a correr como root, y conviene saber lo que cuesta: si algun dia
+# hay un fallo en este proceso, se explota con todos los privilegios de la
+# maquina en vez de con los de un usuario sin permisos. A cambio, /root es
+# 0700, asi que el inventario -que ahora puede llevar contrasenas de los
+# routers en claro- no lo lee ningun otro usuario del sistema.
+# Si algun dia se quiere bajar el privilegio: crear el usuario mkbackup, mover
+# la carpeta a /var/lib/mkbackup y cambiar User=, Group= y ReadWritePaths=.
+User=root
+Group=root
+WorkingDirectory=/root/mkbackup
+ExecStart=/root/mkbackup/.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --planificador
+
+# Si el programador se cae (bug, OOM), sin esto la flota se queda sin
+# respaldos hasta que alguien lo note. 30s de margen para no entrar en un
+# bucle de reinicios si el fallo es de arranque.
+Restart=on-failure
+RestartSec=30
+
+# El proceso corre como root, asi que este endurecimiento importa MAS, no
+# menos: es lo unico que queda entre un fallo aqui y el resto de la maquina.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# ProtectHome=true dejaria /root inaccesible, que es justo donde vive todo.
+# Se apaga solo para eso, y ReadWritePaths acota lo que se puede escribir.
+ProtectHome=false
+# Aqui escribe el repo git, los binarios, el inventario (altas desde el panel
+# y renombrados automaticos), estado.json y programador.json.
+ReadWritePaths=/root/mkbackup
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Al recibir SIGTERM el programador NO corta el ciclo en curso: interrumpir un
+# respaldo a medias deja el commit y el estado sucios. Se le da el mismo
+# margen que tenia el ciclo antiguo para terminar; si esta esperando entre
+# ciclos, para en unos segundos y esto no se usa.
+TimeoutStopSec=3600
+
+[Install]
+WantedBy=multi-user.target
