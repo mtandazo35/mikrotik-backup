@@ -178,16 +178,26 @@ def paginas_a_revisar():
     return salida
 
 
-def ejecutar_barra() -> None:
-    """Corre tests/barra.js contra el JS que sale de panel(), con node."""
-    import re
+def ejecutar_graficas() -> None:
+    """Corre tests/graficas.js: comprueba que las graficas se DIBUJAN.
+
+    Lo de arriba mira el HTML, y ahi un <svg> vacio pasa todas las
+    comprobaciones: el elemento existe, las etiquetas cuadran, el CSS esta
+    bien. Lo que falta es el codigo que lo llena, y eso solo se ve
+    ejecutandolo. Paso de verdad: al quitar un bloque del panel se fue por
+    delante la llamada que dibujaba una de las tartas, y en pantalla quedo un
+    hueco que no dio ningun error.
+
+    Necesita node. Si no esta, se dice y no cuenta como fallo: no se le va a
+    exigir node a quien solo quiere respaldar routers.
+    """
     import shutil
     import subprocess
     import tempfile
 
     print()
     if not shutil.which("node"):
-        print("[ -- ] la barra no se ejecuta: no hay node (no cuenta como fallo)")
+        print("[ -- ] las graficas no se ejecutan: no hay node (no es un fallo)")
         return
 
     html = pg.panel(SESION, 3, "America/Guayaquil")
@@ -198,18 +208,22 @@ def ejecutar_barra() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         js = Path(tmp) / "panel.js"
+        pagina = Path(tmp) / "panel.html"
         js.write_text(guiones[0], encoding="utf-8")
+        # Sin el <script>: si no, los ids del propio JS se contarian como
+        # graficas declaradas en el HTML.
+        pagina.write_text(re.sub(r"<script.*?</script>", "", html, flags=re.S),
+                          encoding="utf-8")
         r = subprocess.run(
-            ["node", str(Path(__file__).parent / "barra.js"), str(js)],
+            ["node", str(Path(__file__).parent / "graficas.js"), str(js),
+             str(pagina)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
     for linea in (r.stdout or "").splitlines():
-        if linea.startswith("[OK  ]") or linea.startswith("[FALLA]"):
-            print(linea)
-        elif linea.startswith("---"):
+        if linea.startswith(("[OK  ]", "[FALLA]")):
             print(linea)
     if r.returncode != 0:
-        FALLOS.append("la geometria de la barra del panel esta mal")
+        FALLOS.append("alguna grafica del panel no se dibuja")
         print((r.stderr or "").strip()[:400])
 
 
@@ -287,17 +301,6 @@ def main() -> None:
     comprobar("esc() tapa las comillas, no solo los angulos",
               pg.esc('a"b\'c<d>e&f') == "a&quot;b&#x27;c&lt;d&gt;e&amp;f")
 
-    # --- 8. La barra del panel, EJECUTADA -----------------------------------
-    # Lo de arriba mira el HTML; la barra la dibuja el JavaScript en el
-    # navegador, y ahi "compila" no basta: un reparto de anchos puede compilar
-    # perfectamente y salirse de su caja. Paso de verdad -con 300 equipos y 1
-    # fallo la suma daba 100.27 y el recorte se comia el sobrante, dejando el
-    # trozo del fallo MAS estrecho que el minimo que queria garantizarse- y no
-    # habia forma de verlo sin ejecutarlo.
-    #
-    # Necesita node. Si no esta, se dice y no se cuenta como fallo: no se le va
-    # a exigir node a quien solo quiere respaldar routers.
-    ejecutar_barra()
 
     # --- El login SIEMPRE centrado -----------------------------------------
     # Esto se ha ido a un lado dos veces, y las dos las tuvo que ver el usuario
@@ -330,24 +333,23 @@ def main() -> None:
                   f"{laterales[:1] or ''}", not laterales)
 
     # --- Las graficas del panel, las dos formas -----------------------------
-    # Las tartas se quitaron en un rediseno "porque una barra se lee mejor", y
-    # el usuario las echo en falta. Tenia razon: la barra contesta "cuanta
-    # flota esta cubierta" y las tartas contestan "como se reparte", que no es
-    # la misma pregunta. Se comprueba que estan las dos cosas para que no
-    # vuelva a desaparecer ninguna en la proxima limpieza.
+    # Las tartas se quitaron una vez en un rediseno y hubo que devolverlas.
+    # Se comprueba que siguen ahi para que no vuelva a pasar en la proxima
+    # limpieza.
     print()
     panel_html = pg.panel(SESION, 3, "America/Guayaquil")
-    for id_svg, que in (("b-estado", "la barra de cobertura"),
-                        ("t-estado", "la tarta del resultado"),
+    for id_svg, que in (("t-estado", "la tarta del resultado"),
                         ("t-clientes", "la tarta por cliente")):
         comprobar(f"el panel trae {que}", f'id="{id_svg}"' in panel_html)
-    for id_ul in ("l-estado", "l-tarta-estado", "l-clientes"):
+    for id_ul in ("l-tarta-estado", "l-clientes"):
         comprobar(f"y su leyenda ({id_ul})", f'id="{id_ul}"' in panel_html)
     # Cada grafica necesita su propia leyenda: si dos compartieran id, la
     # segunda pisaria a la primera y una de las dos se quedaria en blanco.
     ids = re.findall(r'id="(l-[\w-]+)"', panel_html)
     comprobar(f"ninguna leyenda comparte id con otra {ids}",
               len(ids) == len(set(ids)))
+
+    ejecutar_graficas()
 
     print()
     if FALLOS:
