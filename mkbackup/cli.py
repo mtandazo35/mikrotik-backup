@@ -41,6 +41,24 @@ def _configurar_log(verboso: bool) -> None:
     # paramiko es muy ruidoso en INFO
     logging.getLogger("paramiko").setLevel(logging.WARNING)
 
+    # Y transport, ademas de ruidoso, es un agujero. Cuando su hilo de fondo se
+    # encuentra una excepcion la vuelca ENTERA -mensaje y traceback, una linea
+    # de log por linea de pila- desde dentro de paramiko, sin pasar por
+    # _censurar. Todo device.py esta escrito sobre la premisa de que nada llega
+    # a un log sin pasar por el censor; esto la rompia por detras, y justo en el
+    # camino que mas cerca esta de la contrasena (el saludo y la autenticacion).
+    #
+    # Ademas no aporta: cada fallo que vuelca aqui ya sale por nuestro log
+    # clasificado, con el nombre del equipo y en una linea. Con la flota entera
+    # caida (un enlace de subida que se va) esto multiplicaba el journal por
+    # tres tracebacks * 300 equipos y enterraba las lineas que si se leen.
+    #
+    # Con -v se deja hablar: ahi hay alguien mirando a proposito. Aun asi NUNCA
+    # a DEBUG (ver la cabecera de device.py: vuelca los paquetes en crudo).
+    logging.getLogger("paramiko.transport").setLevel(
+        logging.ERROR if verboso else logging.CRITICAL
+    )
+
 
 MINIMO_CLAVE = 8
 

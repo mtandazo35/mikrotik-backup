@@ -1324,10 +1324,13 @@ python -m tests.test_importar     # cabeceras, sinonimos, csv y xlsx
 python -m tests.test_planificador # intervalos, descuento del ciclo, pausa minima
 python -m tests.test_usuarios     # roles, permisos, alcance y la invariante
 python -m tests.test_hechos       # modelo, version, ultimo ok y dato vacio
+python -m tests.test_device       # clasificacion de fallos, export, credenciales
 ```
 
-**857 comprobaciones** entre los nueve archivos, todas en verde hoy. No
-requieren ningún equipo ni red.
+**900 comprobaciones** entre los diez archivos, todas en verde hoy. No
+requieren ningún equipo ni red: `test_device` levanta un socket local que
+acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
+MikroTik con la lista de direcciones puesta.
 
 | Módulo | Comprobaciones |
 |---|---|
@@ -1340,6 +1343,7 @@ requieren ningún equipo ni red.
 | `test_planificador` | 79 |
 | `test_usuarios` | 259 |
 | `test_hechos` | 38 |
+| `test_device` | 43 |
 
 ### Probar el flujo completo sin hardware
 

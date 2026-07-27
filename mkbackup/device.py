@@ -69,6 +69,29 @@ class ErrorEquipo(Exception):
 CONEXION_CORTADA = (EOFError, ConnectionResetError, BrokenPipeError)
 
 
+# --- El saludo que nunca llega ----------------------------------------------
+# Un MikroTik con la lista de direcciones puesta ('/ip service set ssh
+# address=...') no rechaza la conexion: ACEPTA el TCP y lo cierra acto seguido
+# sin mandar su banner. paramiko se encuentra el socket cerrado leyendo el
+# saludo y envuelve lo que sea que paso -ConnectionResetError, timeout- en un
+# SSHException("Error reading SSH protocol banner..."). Al venir envuelto, ni
+# CONEXION_CORTADA ni el except de OSError lo ven: caia en el cajon de
+# DESCONOCIDO con el texto "error SSH", que manda a quien lo lee a revisar la
+# configuracion de SSH cuando lo que hay que tocar es una lista de acceso.
+#
+# Merece mensaje propio porque es EL fallo del dia uno: das de alta el servidor
+# de respaldos, el router es de un cliente que tiene su ACL puesta, y lo unico
+# que se ve es un timeout raro. Con el motivo escrito se arregla en medio minuto.
+#
+# Se mira el texto y no el tipo porque paramiko no distingue este caso con una
+# excepcion propia. Se mira solo 'banner', que es la palabra que pone paramiko
+# y no depende de la causa (reset, timeout o cierre limpio dan las tres el mismo
+# mensaje). __context__ tampoco sirve de discriminador: cuando el equipo cierra
+# sin RST no hay excepcion original que mirar.
+def _es_saludo_cortado(exc: Exception) -> bool:
+    return "banner" in str(exc).lower()
+
+
 @dataclass
 class Resultado:
     equipo: Equipo
@@ -480,6 +503,19 @@ class Conexion:
                 TipoError.SIN_CONEXION, self._limpio(f"no se pudo conectar: {exc}")
             ) from exc
         except paramiko.SSHException as exc:
+            if _es_saludo_cortado(exc):
+                raise ErrorEquipo(
+                    TipoError.SIN_CONEXION,
+                    self._limpio(
+                        f"el equipo acepto la conexion al puerto "
+                        f"{self.equipo.puerto} pero la cerro sin identificarse. "
+                        f"Lo normal es que solo admita SSH desde ciertas "
+                        f"direcciones: revisa en el router "
+                        f"'/ip service print' (la columna ADDRESS del servicio "
+                        f"ssh) y las reglas de '/ip firewall filter', y anade "
+                        f"la IP de este servidor"
+                    ),
+                ) from exc
             raise ErrorEquipo(
                 TipoError.DESCONOCIDO, self._limpio(f"error SSH: {exc}")
             ) from exc
