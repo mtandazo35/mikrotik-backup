@@ -157,6 +157,29 @@ class Hechos:
             equipos[nombre] = datos
             self._guardar(equipos)
 
+    def renombrar(self, viejo: str, nuevo: str) -> bool:
+        """Mueve lo que se sabe de un equipo a su nombre nuevo.
+
+        Lo que aqui se guarda esta indexado por el nombre, asi que renombrar un
+        equipo desde el panel lo dejaba huerfano: el equipo aparecia sin modelo,
+        sin version y como "todavia no respaldado", cuando llevaba meses
+        respaldandose. Se arreglaba solo en el ciclo siguiente, que con el
+        intervalo por defecto son hasta cuatro horas, y mientras tanto no
+        llevaba ni la marca de "fallando" que hiciera sospechar.
+
+        Devuelve False si no habia nada que mover o si el destino ya existia
+        (ahi manda lo del destino: es un equipo que si tiene datos propios).
+        """
+        if not viejo or not nuevo or viejo == nuevo:
+            return False
+        with self._lock:
+            equipos = self._cargar()
+            if viejo not in equipos or nuevo in equipos:
+                return False
+            equipos[nuevo] = equipos.pop(viejo)
+            self._guardar(equipos)
+            return True
+
     def limpiar(self, nombres) -> int:
         """Olvida los equipos que ya no estan en el inventario. Devuelve cuantos.
 
