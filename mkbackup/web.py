@@ -57,7 +57,7 @@ from .inventory import (
     guardar,
     validar_equipo,
 )
-from .planificador import estado_programador
+from .planificador import estado_programador, pedir_ciclo
 from .sesion import COOKIE, Sesiones
 from .store import Almacen
 from .auditoria import Auditoria
@@ -471,6 +471,21 @@ class Manejador(BaseHTTPRequestHandler):
         # (que es lo que hace el dict de abajo) perderia el resto.
         self.campos_lista = parse_qs(crudo, keep_blank_values=True)
         return {k: v[0] for k, v in self.campos_lista.items()}
+
+    def _tragar_cuerpo(self) -> bool:
+        """Lee y descarta el cuerpo del POST. False si ya se contesto con error.
+
+        Un formulario SIN campos manda Content-Length: 0 y aqui no hay nada que
+        leer, asi que da la sensacion de que sobra. No sobra: con HTTP/1.1 la
+        conexion se queda abierta, y lo que quede sin leer en el socket lo
+        interpreta la peticion SIGUIENTE como su primera linea. El sintoma no
+        es un error legible, es la conexion cayendose a la mitad.
+
+        Se llama tambien desde los formularios vacios de hoy porque el dia que
+        alguien les anada una casilla, esa casilla ya viaja: acordarse entonces
+        no es un plan.
+        """
+        return self._campos() is not None
 
     def _consulta_lista(self, clave: str) -> list[str]:
         """Todos los valores de un parametro repetido en la URL.
@@ -1096,6 +1111,9 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes":
             if self._permite("ajustes"):
                 self._ajustes()
+        elif ruta == "/ajustes/respaldar":
+            if self._permite("ajustes"):
+                self._respaldar_ahora()
         elif ruta == "/ajustes/ssh":
             if self._permite("ajustes"):
                 self._ajustes_ssh()
@@ -1889,6 +1907,9 @@ class Manejador(BaseHTTPRequestHandler):
 
     def _ajustes_fondo_quitar(self) -> None:
         """Deja la pantalla de entrada sin imagen."""
+        if not self._tragar_cuerpo():
+            return
+
         actual = self.cfg.web.fondo_login
         self.cfg.guardar_ajustes({"fondo_login": ""})
         if actual:
@@ -1901,6 +1922,43 @@ class Manejador(BaseHTTPRequestHandler):
         log.info("%s quito el fondo del login", self.usuario.nombre)
         self._anotar("ajustes", "quito el fondo del login")
         self._ajustes_ok("Fondo quitado.")
+
+    def _respaldar_ahora(self) -> None:
+        """Pide al programador que arranque un ciclo ya.
+
+        El panel NO lanza el respaldo: deja la peticion y el programador la
+        recoge en su siguiente vistazo (ver planificador.pedir_ciclo). Hacerlo
+        aqui significaria dos procesos escribiendo en el mismo repositorio de
+        git, que es exactamente lo que este proyecto evita.
+        """
+        if not self._tragar_cuerpo():
+            return
+
+        prog = estado_programador(self.cfg)
+
+        # Si ya hay uno corriendo no se pide otro: el programador es de un solo
+        # hilo y lo encolaria detras, asi que quien le da al boton esperaria sin
+        # entender por que no pasa nada. Mejor decirlo.
+        if prog.get("corriendo"):
+            self._ajustes_ok(
+                "Ya hay un respaldo en marcha ahora mismo. Mira como va en Estado."
+            )
+            return
+
+        if not pedir_ciclo(self.cfg, self.usuario.nombre):
+            self._fondo_error(
+                "No se pudo dejar la peticion. Revisa que el servicio pueda "
+                "escribir en la carpeta de datos."
+            )
+            return
+
+        log.info("%s pidio un respaldo inmediato desde el panel",
+                 self.usuario.nombre)
+        self._anotar("respaldo_manual", "pidio un respaldo inmediato")
+        self._ajustes_ok(
+            "Respaldo pedido: el programador lo arranca en unos segundos. "
+            "Se sigue en Estado."
+        )
 
     def _ajustes_ok(self, mensaje: str) -> None:
         self._html(paginas.ajustes(

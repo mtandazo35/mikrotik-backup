@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mkbackup import inventory, planificador as pl
+from mkbackup.config import Config
 
 FALLOS = []
 
@@ -391,6 +392,57 @@ def main() -> None:
         comprobar("Equipo aun no trae intervalo_minutos: toda la flota hereda",
                   pl.intervalo_efectivo(
                       inventory.Equipo(nombre="core-02", ip="10.0.0.2"), 240) == 240)
+
+    # --- 7. "Respaldar ahora" ----------------------------------------------
+    # El panel NO lanza el respaldo: deja una peticion en disco y el
+    # programador la recoge. Dos procesos escribiendo en el mismo repositorio
+    # de git es lo unico que este proyecto no puede permitirse (index.lock), y
+    # es justo lo que haria un boton que arrancara su propio ciclo.
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Config()
+        cfg.almacen.estado = str(Path(tmp) / "estado.json")
+
+        comprobar("sin peticion, no hay nada que recoger",
+                  pl.recoger_peticion(cfg) is None)
+
+        comprobar("el panel puede dejar la peticion",
+                  pl.pedir_ciclo(cfg, "manuel") is True)
+        comprobar("y queda un archivo, que es lo que ve el programador",
+                  pl.ruta_peticion(cfg).is_file())
+
+        comprobar("el programador la recoge y sabe quien la pidio",
+                  pl.recoger_peticion(cfg) == "manuel")
+        # Recogerla la CONSUME. Sin esto, el programador encadenaria un ciclo
+        # cada 5 segundos para siempre, que es peor que no tener el boton.
+        comprobar("recogerla la consume: no se repite el ciclo",
+                  pl.recoger_peticion(cfg) is None)
+        comprobar("y el archivo desaparece",
+                  not pl.ruta_peticion(cfg).exists())
+
+        # Dos clicks seguidos son UN ciclo, no dos encolados.
+        pl.pedir_ciclo(cfg, "uno")
+        pl.pedir_ciclo(cfg, "dos")
+        comprobar("dos clicks seguidos dejan una sola peticion",
+                  pl.recoger_peticion(cfg) == "dos"
+                  and pl.recoger_peticion(cfg) is None)
+
+        # Un archivo que no se entiende NO puede dejar al programador
+        # arrancando ciclos sin parar: se consume igual. Que exista ya
+        # significa que alguien le dio al boton.
+        pl.ruta_peticion(cfg).write_text("esto no es json", encoding="utf-8")
+        comprobar("una peticion ilegible se atiende igual (el archivo es la senal)",
+                  pl.recoger_peticion(cfg) == "")
+        comprobar("y tambien se consume, no se queda dando vueltas",
+                  pl.recoger_peticion(cfg) is None)
+
+        # Vacio tambien: el nombre es lo accesorio.
+        pl.ruta_peticion(cfg).write_text("{}", encoding="utf-8")
+        comprobar("sin nombre dentro, sigue siendo una peticion valida",
+                  pl.recoger_peticion(cfg) == "")
+
+        comprobar("la peticion vive al lado del estado, no en otra carpeta",
+                  pl.ruta_peticion(cfg).parent
+                  == Path(cfg.almacen.estado).parent)
 
     print()
     if FALLOS:

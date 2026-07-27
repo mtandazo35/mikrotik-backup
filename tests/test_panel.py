@@ -211,6 +211,7 @@ def main() -> None:
                                      "clave2": "clave-larga-1",
                                      "rol": "operador"}),
                 ("/ajustes", {"intervalo_minutos": "240"}),
+                ("/ajustes/respaldar", {}),
                 ("/cuenta", {"actual": Panel.CLAVE,
                              "clave": "otra-clave-larga",
                              "clave2": "otra-clave-larga"}),
@@ -222,6 +223,23 @@ def main() -> None:
                 comprobar(f"POST {ruta} -> respuesta sensata (dio {codigo})", bien)
                 if not bien:
                     print("        ->", cuerpo[:200].replace("\n", " "))
+
+            print("\n--- Respaldar ahora ---")
+            # El panel NO lanza el respaldo: deja una peticion en disco que
+            # recoge el programador. Si lo lanzara el mismo habria dos procesos
+            # escribiendo en el mismo repositorio de git, que es lo unico que
+            # este proyecto no se puede permitir.
+            from mkbackup import planificador as pl
+
+            pl.ruta_peticion(panel.cfg).unlink(missing_ok=True)
+            codigo, html = panel.pedir("/ajustes/respaldar", {"x": "1"})
+            comprobar(f"el boton contesta (dio {codigo})", codigo == 200)
+            comprobar("y deja la peticion en disco, para el programador",
+                      pl.ruta_peticion(panel.cfg).is_file())
+            comprobar("con el nombre de quien lo pidio",
+                      pl.recoger_peticion(panel.cfg) == panel.cfg.web.usuario)
+            comprobar("y el panel dice que quedo pedido",
+                      "pedido" in html.lower())
 
             print("\n--- Y lo que no existe no tumba nada ---")
             for ruta in ("/no-existe", "/equipos/../../etc/passwd", "/equipos/"):

@@ -49,6 +49,7 @@ EVENTOS = {
     "importacion": "Importo equipos",
     "ajustes": "Cambio los ajustes",
     "acceso_ssh": "Cambio el acceso a los routers",
+    "respaldo_manual": "Pidio un respaldo inmediato",
 }
 
 # Eventos que conviene mirar aunque no haya pasado nada mas: son los que

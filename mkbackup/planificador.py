@@ -128,6 +128,73 @@ def ruta_programador(cfg) -> Path:
     return Path(cfg.almacen.estado).parent / NOMBRE_ARCHIVO
 
 
+# --- "Respaldar ahora" ------------------------------------------------------
+# El panel y el programador son DOS PROCESOS. El panel no puede lanzar el ciclo
+# el mismo: git no admite dos escrituras a la vez sobre el mismo indice
+# (index.lock), y todo el diseno de este proyecto se apoya en que solo hay un
+# escritor. Un boton que arrancara su propio respaldo corromperia el
+# repositorio justo cuando mas gente lo esta usando.
+#
+# Asi que el panel deja una peticion en disco y el programador la recoge en su
+# siguiente vistazo. Ya despierta cada PASO_ESPERA segundos para mirar si hay
+# que parar o si cambio el intervalo, o sea que esto no cuesta ni un temporizador
+# mas: el retardo maximo son esos mismos segundos.
+#
+# El archivo se BORRA al recogerlo, y ese borrado es lo que evita que dos clicks
+# seguidos encadenen dos ciclos.
+NOMBRE_PETICION = "respaldar-ahora"
+
+
+def ruta_peticion(cfg) -> Path:
+    return Path(cfg.almacen.estado).parent / NOMBRE_PETICION
+
+
+def pedir_ciclo(cfg, quien: str = "") -> bool:
+    """Deja pedido un ciclo inmediato. La escribe el PANEL."""
+    ruta = ruta_peticion(cfg)
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(
+            json.dumps({"quien": quien, "cuando": _ahora()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return True
+    except OSError as exc:
+        log.warning("No se pudo dejar la peticion de respaldo: %s", exc)
+        return False
+
+
+def recoger_peticion(cfg) -> str | None:
+    """Si hay un ciclo pedido, lo consume y dice quien lo pidio. Lo lee el PROGRAMADOR.
+
+    Devuelve None si no habia nada. El nombre puede venir vacio si el archivo
+    estaba a medio escribir: eso NO cancela la peticion, porque el archivo
+    existiendo ya significa que alguien le dio al boton, y perder el ciclo por
+    no saber el nombre seria cambiar lo importante por lo accesorio.
+    """
+    ruta = ruta_peticion(cfg)
+    try:
+        crudo = ruta.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log.warning("No se pudo leer %s: %s", ruta, exc)
+        return None
+    finally:
+        # Se borra SIEMPRE que se haya llegado a mirar, incluso si el contenido
+        # no se entiende: si no, un archivo ilegible dejaria al programador
+        # arrancando un ciclo cada 5 segundos para siempre.
+        try:
+            ruta.unlink()
+        except OSError:
+            pass
+
+    try:
+        return str(json.loads(crudo).get("quien") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
 def espera_hasta_el_turno(duracion_ciclo: float, intervalo_minutos: int) -> float:
     """Segundos a esperar tras un ciclo que duro `duracion_ciclo` segundos.
 
@@ -502,6 +569,16 @@ def planificar(cfg) -> int:
     ultimo_lote = 0
     duracion = 0.0
     primera = True
+    # Un ciclo pedido desde el panel. Se limpia al arrancar por si el servicio
+    # murio con una peticion sin atender: al volver, lo primero que hace es la
+    # vuelta con al_arrancar, que ya respalda todo, y arrastrar la peticion
+    # encadenaria un segundo ciclo identico detras.
+    a_mano = False
+    try:
+        ruta_peticion(cfg).unlink()
+        log.info("Habia un respaldo pedido sin atender: lo cubre el arranque.")
+    except OSError:
+        pass
 
     # Se arranca con lo que dejo la ejecucion anterior: sin esto, cada reinicio
     # del servicio (o cada despliegue) volveria a respaldar la flota entera,
@@ -607,6 +684,12 @@ def planificar(cfg) -> int:
 
         # Instante de referencia comun para la espera y para sus recalculos
         # (ver _espera_tic): los dos tienen que medir desde el mismo sitio.
+        # Un ciclo pedido a mano toca a TODOS. Quien le da al boton quiere ver
+        # su flota respaldada ahora, no "a los tres que les tocaba".
+        if a_mano:
+            pendientes = list(equipos)
+            a_mano = False
+
         arranque = datetime.now(timezone.utc)
         # `primera` sigue en True mientras no haya entrado ni un equipo: es
         # justo la instalacion recien hecha, y ahi el inventario vacio se
@@ -614,21 +697,28 @@ def planificar(cfg) -> int:
         espera = _espera_tic(
             equipos, ultimas, intervalo_global, duracion, arranque, primera
         )
-        if espera > 0 and _esperar(
-            cfg,
-            parar,
-            espera,
-            publicar,
-            lambda: _espera_tic(
-                equipos,
-                ultimas,
-                cfg.planificador.intervalo_minutos,
-                duracion,
-                arranque,
-                primera,
-            ),
-        ):
-            break
+        if espera > 0:
+            motivo = _esperar(
+                cfg,
+                parar,
+                espera,
+                publicar,
+                lambda: _espera_tic(
+                    equipos,
+                    ultimas,
+                    cfg.planificador.intervalo_minutos,
+                    duracion,
+                    arranque,
+                    primera,
+                ),
+            )
+            if motivo == "parar":
+                break
+            a_mano = motivo == "ahora"
+        else:
+            # Sin espera tampoco se pierde una peticion: puede haber entrado
+            # mientras corria el ciclo anterior.
+            a_mano = recoger_peticion(cfg) is not None
 
     log.info("Programador parado tras %d ciclo(s).", ciclos)
     publicar(proxima=None, corriendo=False)
@@ -678,8 +768,13 @@ def _en(segundos: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=segundos)).isoformat()
 
 
-def _esperar(cfg, parar: threading.Event, espera: float, publicar, recalcular) -> bool:
-    """Espera hasta el proximo tic. Devuelve True si toca parar.
+def _esperar(cfg, parar: threading.Event, espera: float, publicar, recalcular) -> str:
+    """Espera hasta el proximo tic. Dice POR QUE se desperto.
+
+    Devuelve "parar" si hay que terminar, "ahora" si alguien pidio un ciclo
+    desde el panel, y "" si simplemente se cumplio el plazo. Antes devolvia un
+    si/no; hace falta el tercer caso porque un ciclo pedido a mano respalda la
+    flota ENTERA, y no solo a los equipos que les tocaba.
 
     La espera se parte en trozos de PASO_ESPERA en vez de un unico sleep
     largo por dos motivos: un SIGTERM se atiende en segundos (systemd no se
@@ -700,9 +795,18 @@ def _esperar(cfg, parar: threading.Event, espera: float, publicar, recalcular) -
     while True:
         restante = espera - (time.monotonic() - inicio)
         if restante <= 0:
-            return False
+            return ""
         if parar.wait(min(PASO_ESPERA, restante)):
-            return True
+            return "parar"
+
+        # Antes que nada: si alguien le dio al boton, se deja de esperar. Va
+        # primero para que un ciclo pedido a mano no tenga que aguantar a que
+        # se relean los ajustes.
+        quien = recoger_peticion(cfg)
+        if quien is not None:
+            log.info("Respaldo pedido desde el panel%s: se arranca ya",
+                     f" por {quien}" if quien else "")
+            return "ahora"
 
         # Solo los ajustes del panel: es un JSON diminuto y no lanza (ver
         # Config.aplicar_ajustes). El YAML completo se relee al empezar el

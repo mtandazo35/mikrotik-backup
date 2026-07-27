@@ -515,6 +515,13 @@ ESTILO = """
   h2.aparte { margin-top: 1.6rem; }
   .pista.bajo-titulo { margin: -.5rem 0 1rem; }
   .separado { margin-top: 1.1rem; }
+  /* "Respaldar ahora": va separado por una linea del formulario de arriba
+     porque es OTRA cosa (una accion, no un ajuste que se guarda), y el boton
+     es secundario a proposito: lo habitual es dejar que el programador haga su
+     trabajo, esto es para cuando no se quiere esperar. */
+  .ahora { border-top: 1px solid var(--borde); padding-top: 1.1rem;
+           display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; }
+  .ahora .pista { flex: 1; min-width: 200px; margin: 0; }
   .casilla.destacada { margin-bottom: .8rem; }
 
   /* --- Adaptable ---
@@ -1197,7 +1204,7 @@ def panel(sesion, refresco: int, zona: str = "America/Guayaquil") -> str:
         sesion,
         activo="estado",
         cabeza='<span class="sub" id="fuente"></span>',
-        pie="Los respaldos los dispara el programador. Este panel no los lanza.",
+        pie="Los respaldos los dispara el programador, en su ciclo. Desde Ajustes se le puede pedir uno ahora mismo.",
         guion=(
             _JS_PANEL.replace("__REFRESCO__", str(int(refresco)))
             # La zona va como texto dentro de una cadena JS: se limita a lo que
@@ -1815,6 +1822,16 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
              podria no respaldar nunca.</div>
       </div>
       <button type="submit">Guardar</button>
+    </form>
+
+    <!-- En su propio formulario, y no como un segundo boton del de arriba:
+         pedir un respaldo no debe guardar de paso un intervalo que quiza se
+         estaba tecleando a medias, ni al reves. -->
+    <form method="post" action="/ajustes/respaldar" class="separado ahora">
+      <button type="submit" class="secundario">Respaldar ahora</button>
+      <span class="pista">Sin esperar al proximo ciclo. Lo arranca el
+        programador en unos segundos y toca a la flota entera; el avance se ve
+        en Estado.</span>
     </form>
   </div>
 
