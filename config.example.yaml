@@ -186,6 +186,21 @@ web:
   intentos_max: 5
   bloqueo_segundos: 300
 
+  # Direcciones de los proxies que van DELANTE del panel. Vacio = ninguno, y
+  # entonces la cabecera X-Forwarded-For se ignora por completo.
+  #
+  # Si pones un proxy con TLS delante (que es lo recomendado para verlo desde
+  # otra maquina), SIN esto todas las peticiones llegan desde la direccion del
+  # proxy: el freno a la fuerza bruta pasa a ser un cubo compartido -cinco
+  # fallos de cualquiera dejan fuera a todo el mundo- y cada linea del registro
+  # de accesos dice 127.0.0.1 en vez de quien entro.
+  #
+  # Va la direccion desde la que TE LLEGA la conexion del proxy, normalmente
+  # 127.0.0.1. Nunca un rango ni un nombre. Y solo la de tu proxy: cualquier
+  # direccion que pongas aqui puede decir que es quien quiera.
+  proxies_de_confianza: []
+    # - 127.0.0.1
+
 telegram:
   token: ""
   chat_id: ""

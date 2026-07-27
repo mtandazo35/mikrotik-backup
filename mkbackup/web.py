@@ -153,6 +153,43 @@ def _tipo_real(datos: bytes) -> str:
     return ""
 
 
+# --- De donde viene de verdad la peticion -----------------------------------
+# El despliegue que este proyecto recomienda (panel en 127.0.0.1 y un proxy con
+# TLS delante) hace que TODAS las peticiones lleguen desde la direccion del
+# proxy. Con client_address a secas eso rompe dos cosas que si importan:
+#
+#   - el freno a la fuerza bruta pasa a ser un cubo unico para todo el mundo.
+#     Cinco fallos de cualquiera dejan fuera a la empresa entera durante
+#     bloqueo_segundos: de proteccion pasa a ser la forma mas comoda de tumbar
+#     el panel.
+#   - el registro de accesos, que se pidio justamente para saber quien intenta
+#     entrar, escribe 127.0.0.1 en todas sus lineas.
+#
+# La regla es no creerse NUNCA una cabecera que escribe quien llama, salvo que
+# venga por un camino declarado de antemano. Si la conexion no viene de un
+# proxy de la lista, X-Forwarded-For se ignora entera. Si viene, se recorre de
+# derecha a izquierda y se coge el primer salto que NO sea uno de los nuestros:
+# los de mas a la derecha los escribio nuestra propia infraestructura, y todo
+# lo que hay mas a la izquierda lo pudo inventar el cliente.
+
+
+def _ip_de(client_address, cabeceras, de_confianza) -> str:
+    """La direccion a la que se le apuntan los intentos y las lineas del log."""
+    directa = client_address[0] if client_address else ""
+    if not de_confianza or directa not in de_confianza:
+        return directa
+
+    reenviada = cabeceras.get("X-Forwarded-For", "")
+    for salto in reversed([s.strip() for s in reenviada.split(",") if s.strip()]):
+        if salto not in de_confianza:
+            # Se recorta: esto viaja al registro de auditoria y al panel, y lo
+            # escribe quien llama. Auditoria ya limpia los caracteres de
+            # control; el largo se acota aqui para que una cabecera de 8 KB no
+            # se convierta en 8 KB por linea del log.
+            return salto[:64]
+    return directa
+
+
 class Contexto:
     """Lo que comparten todas las peticiones, en un solo sitio.
 
@@ -216,6 +253,18 @@ class Manejador(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     server_version = "mkbackup"
+
+    # Sin esto, una conexion que se abre y NO habla se queda con su hilo para
+    # siempre. Con HTTP/1.1 y keep-alive no hace falta mala fe: basta un
+    # navegador que deja pestanas abiertas o un monitor que no cierra. Y con
+    # mala fe son diez lineas de script para dejar el panel sin hilos justo el
+    # dia que hay que mirar por que no se respaldo la flota.
+    #
+    # 30s es de sobra para cualquier peticion real del panel (la mas lenta es
+    # un diff de 2300 lineas, que se sirve en menos de uno) y corto para una
+    # conexion que no dice nada.
+    timeout = 30
+
     # La cuenta de la peticion en curso; la resuelve do_GET/do_POST.
     usuario = None
     # El cuerpo del POST con todos los valores por nombre; lo llena _campos.
@@ -312,12 +361,24 @@ class Manejador(BaseHTTPRequestHandler):
             "todo": usuario.alcance.todo,
         }
 
+    @property
+    def ip(self) -> str:
+        """De donde viene la peticion, mirando el proxy si hay uno declarado.
+
+        UN SOLO sitio donde se decide, igual que las credenciales en device.py:
+        el freno a la fuerza bruta y el registro de accesos tienen que estar de
+        acuerdo, porque si no se bloquea una direccion y se apunta otra.
+        """
+        return _ip_de(
+            self.client_address, self.headers, self.cfg.web.proxies_de_confianza
+        )
+
     def _anotar(self, evento: str, detalle: str = "", usuario: str = "") -> None:
         """Deja constancia del evento con quien lo hizo y desde donde."""
         self.ctx.auditoria.anotar(
             evento,
             usuario=usuario or getattr(self.usuario, "nombre", ""),
-            ip=self.client_address[0],
+            ip=self.ip,
             detalle=detalle,
         )
 
@@ -1312,7 +1373,7 @@ class Manejador(BaseHTTPRequestHandler):
         if campos is None:
             return
 
-        ip = self.client_address[0]
+        ip = self.ip
         espera = self.ctx.sesiones.bloqueado(ip)
         if espera:
             log.warning("Login bloqueado para %s (%ds restantes)", ip, espera)
@@ -1863,6 +1924,81 @@ class Manejador(BaseHTTPRequestHandler):
         log.debug("%s %s", self.address_string(), formato % args)
 
 
+# Cuantas conexiones se atienden a la vez. Con ThreadingHTTPServer a secas es
+# un hilo por conexion y SIN TOPE: mil conexiones son mil hilos, y ahi el
+# servidor no se defiende, se cae.
+#
+# El numero es alto a proposito, y esto es lo que hay que entender antes de
+# bajarlo: NO es "cuantas personas caben". Con HTTP/1.1 la conexion se queda
+# abierta despues de responder, y un navegador abre hasta SEIS por pestana. El
+# panel ademas se refresca solo cada pocos segundos, o sea que esas conexiones
+# no se quedan quietas. Cuatro personas con tres pestanas cada una pasan
+# holgadamente de 32, y el tope no se nota como lentitud: se nota como una
+# pagina que no carga, que es lo que estaba a punto de introducirse aqui con un
+# tope "razonable" de 32.
+#
+# 128 deja sitio de sobra para la oficina entera y sigue estando muy lejos de
+# lo que hace falta para tumbar la maquina. Lo que quede fuera espera en la
+# cola de accept del sistema, que es lo correcto con una avalancha.
+#
+# El tope y el timeout del manejador van juntos y se sostienen el uno al otro:
+# sin timeout, un tope solo cambia "quedarse sin memoria" por "quedarse
+# atascado para siempre", que no es mejor. Es el timeout el que devuelve las
+# plazas de las conexiones que ya no van a decir nada mas.
+CONEXIONES_MAXIMAS = 128
+
+
+class _Servidor(ThreadingHTTPServer):
+    """ThreadingHTTPServer con tope de hilos y sin heredar el socket a git.
+
+    daemon_threads: al parar el servicio no se espera a las conexiones con
+    keep-alive abiertas, que con un panel que se refresca solo son todas.
+    """
+
+    daemon_threads = True
+    # Una avalancha encuentra la cola llena y se le dice que no ahora, en vez
+    # de aceptarla para morir un poco mas adelante.
+    request_queue_size = 64
+
+    def __init__(self, *args, **kwargs):
+        self._plazas = threading.BoundedSemaphore(CONEXIONES_MAXIMAS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # Si no hay plaza se cierra ya, sin abrir hilo. Preferimos una conexion
+        # rechazada a un servidor que no puede atender ninguna.
+        if not self._plazas.acquire(blocking=False):
+            log.warning(
+                "Panel al limite (%d conexiones): se rechaza la de %s",
+                CONEXIONES_MAXIMAS, client_address[0] if client_address else "?",
+            )
+            # close_request y NO shutdown_request: shutdown_request es quien
+            # suelta la plaza, y aqui no se llego a coger ninguna. Soltarla
+            # igualmente le regalaria un hueco al contador en CADA rechazo, o
+            # sea que el tope subiria solo justo cuando esta de mas.
+            self.close_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # process_request es quien crea el hilo. Si revienta ANTES de
+            # crearlo (sin memoria para un hilo mas, tipicamente) nadie va a
+            # llamar a shutdown_request, y la plaza se quedaria pillada para
+            # siempre: el panel iria quedandose sin sitio poco a poco y sin que
+            # nada lo explicara.
+            self._plazas.release()
+            raise
+
+    def shutdown_request(self, request):
+        # Lo llama process_request_thread al terminar, UNA vez por conexion
+        # aceptada, le fuera bien o mal. Es el unico sitio por el que pasan
+        # todas, asi que es donde se devuelve la plaza.
+        try:
+            super().shutdown_request(request)
+        finally:
+            self._plazas.release()
+
+
 def servir(cfg: Config) -> int:
     # Se comprueba aqui y no en Config.validar(): quien solo respalda no tiene
     # por que configurar el login para que le corra el programador. Pero el
@@ -1909,7 +2045,7 @@ def servir(cfg: Config) -> int:
     manejador = partial(Manejador, ctx=ctx)
 
     try:
-        servidor = ThreadingHTTPServer((cfg.web.direccion, cfg.web.puerto), manejador)
+        servidor = _Servidor((cfg.web.direccion, cfg.web.puerto), manejador)
     except OSError as exc:
         log.error("No se pudo abrir %s:%s - %s", cfg.web.direccion, cfg.web.puerto, exc)
         return 3

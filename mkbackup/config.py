@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -110,6 +111,24 @@ class ConfigWeb:
     # Freno a la fuerza bruta: tras N fallos, esa IP espera.
     intentos_max: int = 5
     bloqueo_segundos: int = 300
+
+    # Direcciones de los proxies que se ponen DELANTE del panel. Vacio =
+    # ninguno, y entonces la cabecera X-Forwarded-For se ignora por completo.
+    #
+    # Hace falta porque el despliegue que este proyecto recomienda -panel en
+    # 127.0.0.1 y un proxy con TLS delante- rompe por completo el freno a la
+    # fuerza bruta y el registro de auditoria: todas las peticiones llegan
+    # desde la direccion del proxy, asi que todo el mundo comparte el mismo
+    # cubo de intentos. Cinco fallos de cualquiera dejan fuera a la empresa
+    # entera durante bloqueo_segundos, y cada linea del registro de accesos
+    # dice 127.0.0.1, que es justo el dato que se queria guardar.
+    #
+    # Va como lista explicita y NUNCA se confia en la cabecera por defecto: es
+    # texto que escribe quien llama, asi que creersela sin mas seria peor que
+    # no mirarla. Un atacante pondria una direccion distinta en cada intento y
+    # no se bloquearia nunca, ademas de poder dejar fuera a quien quisiera
+    # firmando sus intentos con la IP de otro.
+    proxies_de_confianza: tuple = ()
 
     # Ver que cambio y cuando, leyendo el historial de git.
     ver_diferencias: bool = True
@@ -411,6 +430,31 @@ class Config:
             raise ErrorConfig("web.historial_maximo debe ser al menos 1")
         if self.web.eventos_por_pagina < 1:
             raise ErrorConfig("web.eventos_por_pagina debe ser al menos 1")
+
+        # Del YAML llega una lista (o una cadena suelta, si alguien puso una
+        # sola direccion sin guiones). Se normaliza a un frozenset porque se
+        # consulta en CADA peticion, y una cadena sin normalizar seria peor que
+        # inutil: `"127.0.0.1" in "127.0.0.1"` es cierto, pero tambien lo es
+        # `"7.0.0" in "127.0.0.1"`, o sea que un proxy declarado como texto
+        # daria por bueno medio internet.
+        proxies = self.web.proxies_de_confianza
+        if isinstance(proxies, str):
+            proxies = [proxies]
+        if not isinstance(proxies, (list, tuple, set, frozenset)):
+            raise ErrorConfig(
+                "web.proxies_de_confianza tiene que ser una lista de direcciones"
+            )
+        limpias = [str(p).strip() for p in proxies if str(p).strip()]
+        for p in limpias:
+            try:
+                ipaddress.ip_address(p)
+            except ValueError:
+                raise ErrorConfig(
+                    f"web.proxies_de_confianza: '{p}' no es una direccion IP. "
+                    "Va la direccion desde la que TE LLEGA la conexion del "
+                    "proxy (normalmente 127.0.0.1), no un rango ni un nombre."
+                ) from None
+        self.web.proxies_de_confianza = frozenset(limpias)
 
         if self.planificador.intervalo_minutos < 1:
             raise ErrorConfig(
