@@ -1325,12 +1325,20 @@ python -m tests.test_planificador # intervalos, descuento del ciclo, pausa minim
 python -m tests.test_usuarios     # roles, permisos, alcance y la invariante
 python -m tests.test_hechos       # modelo, version, ultimo ok y dato vacio
 python -m tests.test_device       # clasificacion de fallos, export, credenciales
+python -m tests.test_paginas      # el HTML servido, bien formado (CSS, JS, escapado)
 ```
 
-**900 comprobaciones** entre los diez archivos, todas en verde hoy. No
+**1025 comprobaciones** entre los once archivos, todas en verde hoy. No
 requieren ningún equipo ni red: `test_device` levanta un socket local que
 acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
 MikroTik con la lista de direcciones puesta.
+
+`test_paginas` mira la **estructura** del HTML que sirve el panel, no su
+contenido: llaves de CSS cuadradas (una de más apaga media hoja de estilos y el
+navegador no avisa), ningún `const` repetido en el ámbito de fuera (es
+`SyntaxError`, y deja la página en blanco), nada servido después de `</html>` y
+el escapado de lo que escribe una persona. Las tres cosas han roto este panel
+alguna vez con el servidor contestando 200.
 
 | Módulo | Comprobaciones |
 |---|---|
@@ -1340,10 +1348,11 @@ MikroTik con la lista de direcciones puesta.
 | `test_sesion` | 76 |
 | `test_historial` | 161 |
 | `test_importar` | 95 |
-| `test_planificador` | 79 |
+| `test_planificador` | 84 |
 | `test_usuarios` | 259 |
 | `test_hechos` | 38 |
 | `test_device` | 43 |
+| `test_paginas` | 120 |
 
 ### Probar el flujo completo sin hardware
 

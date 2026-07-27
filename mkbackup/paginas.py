@@ -595,12 +595,22 @@ def envoltura(
     activo: str = "",
     cabeza: str = "",
     pie: str = "",
+    guion: str = "",
 ) -> str:
     """El esqueleto comun de todas las paginas de dentro.
 
     `sesion` es un dict con nombre, rol, etiqueta del rol y el conjunto de
     permisos. Va como dict y no como objeto para que este modulo no dependa
     del de usuarios: aqui solo se pinta.
+
+    `guion` es el JavaScript de la pagina, y existe para que entre DENTRO del
+    body. Antes se pegaba detras de lo que devolvia esta funcion, o sea despues
+    de </html>, y el panel funcionaba igual porque los navegadores recuperan de
+    eso metiendo el script en el body ellos mismos. Que funcione por la
+    tolerancia del navegador y no porque este bien no es una base: cualquier
+    cosa que lea el HTML en serio -un proxy que reescribe, una CSP que firma
+    los scripts, un parser estricto- se encuentra 13 KB de codigo fuera del
+    documento.
     """
     sesion = sesion or {}
     permisos = sesion.get("puede", set())
@@ -642,6 +652,7 @@ def envoltura(
   {cuerpo}
   <footer>{pie}</footer>
 </div>
+{f"<script>{guion}</script>" if guion else ""}
 </body>
 </html>
 """
@@ -1107,12 +1118,15 @@ def panel(sesion, refresco: int, zona: str = "America/Guayaquil") -> str:
         activo="estado",
         cabeza='<span class="sub" id="fuente"></span>',
         pie="Los respaldos los dispara el programador. Este panel no los lanza.",
-    ) + "<script>{}</script>".format(
-        _JS_PANEL.replace("__REFRESCO__", str(int(refresco)))
-        # La zona va como texto dentro de una cadena JS: se limita a lo que
-        # puede tener un nombre IANA para que no haya forma de cerrar la
-        # comilla y colar codigo desde la configuracion.
-        .replace("__ZONA__", "".join(c for c in zona if c.isalnum() or c in "/_+-"))
+        guion=(
+            _JS_PANEL.replace("__REFRESCO__", str(int(refresco)))
+            # La zona va como texto dentro de una cadena JS: se limita a lo que
+            # puede tener un nombre IANA para que no haya forma de cerrar la
+            # comilla y colar codigo desde la configuracion.
+            .replace(
+                "__ZONA__", "".join(c for c in zona if c.isalnum() or c in "/_+-")
+            )
+        ),
     )
 
 
