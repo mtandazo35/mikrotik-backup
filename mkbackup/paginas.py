@@ -250,7 +250,10 @@ ESTILO = """
   .cifra b { display: block; font-size: 1.65rem; font-weight: 650;
              letter-spacing: -.025em; line-height: 1.15; }
   /* Solo para los fallos, y solo cuando los hay: el numero se pinta en rojo
-     porque ahi el color SI significa algo. La etiqueta lo dice igualmente. */
+     porque ahi el color SI significa algo, y la etiqueta lo dice igualmente.
+     NO hay equivalente en verde para lo que va bien: un recuadro resaltado
+     tira del ojo, y resaltar lo que no urge es enviar la mirada al sitio
+     equivocado. Que algo este bien se nota porque no esta en rojo. */
   .cifra.malo b { color: var(--fallo); }
   .cifra span { color: var(--suave); font-size: .74rem; text-transform: uppercase;
                 letter-spacing: .05em; display: block; margin-top: .15rem; }
@@ -308,9 +311,13 @@ ESTILO = """
     stroke: var(--panel); stroke-width: 2; }
   .grafica-tarta svg path { transition: opacity .12s ease; }
   .grafica-tarta svg path:hover { opacity: .8; }
-  .centro-cifra { font-size: 1.5rem; font-weight: 650; fill: var(--texto);
-                  letter-spacing: -.02em; }
-  .centro-texto { font-size: .6rem; fill: var(--suave); letter-spacing: .06em; }
+  /* El texto DENTRO de cada porcion. Va sobre el color del sector, asi que
+     lleva una sombra fina del color contrario: sin ella, un nombre claro sobre
+     un amarillo claro se pierde justo en el borde entre dos sectores. */
+  .sector-texto { paint-order: stroke fill; stroke-width: 2.5px;
+                  stroke-linejoin: round; stroke: rgba(0,0,0,.18); }
+  .sector-nom { font-size: 9.5px; font-weight: 600; }
+  .sector-pct { font-size: 11px; font-weight: 700; }
   /* Al lado de una tarta la leyenda va en columna, no en rejilla: tiene que
      caber en lo que sobra a la derecha del circulo. */
   .leyenda-lista { display: block !important; flex: 1; min-width: 165px; }
@@ -867,7 +874,22 @@ function punto(r, frac) {
   return [(85 + r * Math.cos(a)).toFixed(2), (85 + r * Math.sin(a)).toFixed(2)];
 }
 
-const RADIO = 76, HUECO = 47;
+const RADIO = 82;
+
+// Cuanto tiene que ocupar un sector para que le quepa el texto dentro. Son dos
+// umbrales y no uno porque el nombre y el porcentaje no ocupan lo mismo: en un
+// sector mediano cabe el numero pero no la palabra, y meterla igual la dejaria
+// saliendose por el borde o partida.
+const CABE_NOMBRE = 0.10;
+const CABE_PCT = 0.05;
+
+// Un nombre mas largo que esto no cabe en ningun sector: se recorta y el
+// completo se lee en la leyenda, que va al lado.
+const LARGO_ETIQUETA = 16;
+
+function recortar(texto, largo) {
+  return texto.length > largo ? texto.slice(0, largo - 1) + "…" : texto;
+}
 
 function tarta(idSvg, idLeyenda, series, etiquetaCentro) {
   const svg = document.getElementById(idSvg);
@@ -875,14 +897,13 @@ function tarta(idSvg, idLeyenda, series, etiquetaCentro) {
   const total = series.reduce((s, x) => s + x.valor, 0);
 
   if (!total) {
-    svg.innerHTML = `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}"
-      fill="none" stroke="var(--barra)" stroke-width="${RADIO - HUECO}"/>`;
+    svg.innerHTML = `<circle cx="85" cy="85" r="${RADIO}" fill="var(--barra)"/>`;
     leyenda.innerHTML = '<li class="sin-datos">Sin datos todavia.</li>';
     return;
   }
 
   const vivas = series.filter(s => s.valor > 0);
-  let trozos = "", filas = "", acumulado = 0;
+  let trozos = "", textos = "", filas = "", acumulado = 0;
 
   for (const s of vivas) {
     const frac = s.valor / total;
@@ -891,41 +912,49 @@ function tarta(idSvg, idLeyenda, series, etiquetaCentro) {
     acumulado = f1;
 
     if (vivas.length === 1) {
-      // Un solo sector: un arco de 360 grados no se puede dibujar (inicio y
-      // fin caen en el mismo punto y el trazo sale vacio). Se pinta el anillo
-      // como un circulo con borde grueso.
-      trozos += `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}" fill="none"
-        stroke="${s.color}" stroke-width="${RADIO - HUECO}"><title>${escapar(s.etq)}:
-        ${s.valor} (100%)</title></circle>`;
+      // Un arco de 360 grados no se puede dibujar: el inicio y el fin caen en
+      // el mismo punto y el trazo sale vacio. Se pinta el circulo entero.
+      trozos += `<circle cx="85" cy="85" r="${RADIO}" fill="${s.color}"` +
+        `><title>${escapar(s.etq)}: ${s.valor} (100%)</title></circle>`;
     } else {
       const grande = frac > 0.5 ? 1 : 0;
       const [xa, ya] = punto(RADIO, f0), [xb, yb] = punto(RADIO, f1);
-      const [xc, yc] = punto(HUECO, f1), [xd, yd] = punto(HUECO, f0);
-      trozos += `<path d="M ${xa} ${ya} A ${RADIO} ${RADIO} 0 ${grande} 1 ${xb} ${yb}
-        L ${xc} ${yc} A ${HUECO} ${HUECO} 0 ${grande} 0 ${xd} ${yd} Z"
-        fill="${s.color}"><title>${escapar(s.etq)}: ${s.valor} (${pct}%)</title></path>`;
+      trozos += `<path d="M 85 85 L ${xa} ${ya} A ${RADIO} ${RADIO} 0 ${grande} 1 ` +
+        `${xb} ${yb} Z" fill="${s.color}"><title>${escapar(s.etq)}: ` +
+        `${s.valor} (${pct}%)</title></path>`;
     }
 
-    // El porcentaje solo se escribe dentro si el sector da de si; en uno
-    // estrecho el texto se saldria o se recortaria, y para eso esta la
-    // leyenda, que lleva el numero exacto de todas formas.
-    if (frac >= 0.09) {
-      const [xt, yt] = punto((RADIO + HUECO) / 2, f0 + frac / 2);
+    // El texto DENTRO del sector, como en las tartas que se usan para mirar de
+    // un vistazo: nombre arriba y porcentaje debajo. Se pinta despues de todos
+    // los sectores (ver abajo) para que ninguno lo tape.
+    if (frac >= CABE_PCT) {
+      const radio_texto = vivas.length === 1 ? RADIO * 0.42 : RADIO * 0.62;
+      const [xt, yt] = punto(radio_texto, f0 + frac / 2);
+      // Negro o blanco segun lo claro que sea el sector: un 62% en blanco
+      // sobre el amarillo del tema claro no se lee.
       const tinta = luz(s.color) > 0.45 ? "#0b0b0b" : "#ffffff";
-      trozos += `<text x="${xt}" y="${yt}" fill="${tinta}" font-size="12"
-        font-weight="600" text-anchor="middle" dominant-baseline="central"
-        >${pct}%</text>`;
+      const conNombre = frac >= CABE_NOMBRE;
+      textos += `<text x="${xt}" y="${yt}" fill="${tinta}" text-anchor="middle"` +
+        ` class="sector-texto" pointer-events="none">`;
+      if (conNombre) {
+        textos += `<tspan x="${xt}" dy="-0.35em" class="sector-nom"` +
+          `>${escapar(recortar(s.etq, LARGO_ETIQUETA))}</tspan>`;
+        textos += `<tspan x="${xt}" dy="1.25em" class="sector-pct">${pct}%</tspan>`;
+      } else {
+        textos += `<tspan x="${xt}" dy="0.35em" class="sector-pct">${pct}%</tspan>`;
+      }
+      textos += "</text>";
     }
 
-    filas += `<li><span class="marca" style="background:${s.color}"></span>
-      <span class="nom" title="${escapar(s.etq)}">${escapar(s.etq)}</span>
-      <span class="val">${s.valor} &middot; ${pct}%</span></li>`;
+    filas += `<li><span class="marca" style="background:${s.color}"></span>` +
+      `<span class="nom" title="${escapar(s.etq)}">${escapar(s.etq)}</span>` +
+      `<span class="val">${s.valor}<i>${pct}%</i></span></li>`;
   }
 
-  svg.innerHTML = trozos + `
-    <text x="85" y="80" class="centro-cifra" text-anchor="middle">${total}</text>
-    <text x="85" y="97" class="centro-texto" text-anchor="middle"
-      >${escapar(etiquetaCentro)}</text>`;
+  // Los textos van al final del SVG para que queden POR ENCIMA de todos los
+  // sectores. Dibujados dentro del bucle, el sector siguiente tapaba la parte
+  // del texto del anterior que se metiera en su lado.
+  svg.innerHTML = trozos + textos;
   leyenda.innerHTML = filas;
 }
 
@@ -1189,20 +1218,31 @@ function pintar(d) {
   // Los recuadros se quedan solo con el CONTEXTO: cuanta flota hay y cuando
   // toca la proxima vuelta. El resultado del respaldo ya lo cuenta el bloque de
   // arriba, y tenerlo en los dos sitios obligaba a mirar dos veces lo mismo.
-  document.getElementById("cifras").innerHTML = [
+  // Los cinco de siempre, en el mismo orden. NINGUNO lleva color de fondo ni
+  // borde de color: un recuadro resaltado tira del ojo, y el que estaba
+  // resaltado era "Respaldados", o sea la cifra que menos urge. Lo unico que
+  // se pinta es el NUMERO de los fallos, y solo cuando hay alguno.
+  //
+  // El desglose por cliente se anade DETRAS y solo si hay algo que contar: con
+  // la flota entera bien, un "0 clientes con fallos" permanente ensena a no
+  // mirar ese sitio, y entonces el dia que ponga 2 tampoco se mira.
+  const recuadros = [
     ["Clientes", clientes.length, ""],
-    // El desglose por cliente solo aparece cuando dice algo: con todos bien,
-    // un "0 con fallos" permanente ensena a no mirar ese sitio.
-    ...(clientesFallo
-        ? [["Clientes con fallos", clientesFallo, "malo"]] : []),
-    ...(clientesPendiente
-        ? [["Clientes pendientes", clientesPendiente, ""]] : []),
-    ...(clientesFallo || clientesPendiente
-        ? [["Clientes al dia", clientesBien, ""]] : []),
     ["Equipos", equipos.length, ""],
+    ["Respaldados", respaldados, ""],
+    ["Fallidos", fallidos, fallidos ? "malo" : ""],
     ["Proximo ciclo", proximo, ""],
-  ].map(([t, v, clase]) => `<div class="cifra ${clase}"><b>${escapar(v)}</b>` +
-        `<span>${t}</span></div>`).join("");
+  ];
+  if (clientesFallo) {
+    recuadros.push(["Clientes con fallos", clientesFallo, "malo"]);
+    recuadros.push(["Clientes al dia", clientesBien, ""]);
+  }
+  if (clientesPendiente) {
+    recuadros.push(["Clientes pendientes", clientesPendiente, ""]);
+  }
+  document.getElementById("cifras").innerHTML = recuadros
+    .map(([t, v, clase]) => `<div class="cifra ${clase}"><b>${escapar(v)}</b>` +
+         `<span>${t}</span></div>`).join("");
 
   const porCliente = {};
   equipos.forEach(e => { porCliente[e.empresa] = (porCliente[e.empresa] || 0) + 1; });
