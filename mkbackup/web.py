@@ -1454,6 +1454,11 @@ class Manejador(BaseHTTPRequestHandler):
             ip=campos.get("ip", ""),
             puerto=campos.get("puerto", ""),
             grupo=campos.get("grupo", ""),
+            # Sin nombres ocupados: esta sonda NO se guarda, solo se usa para
+            # abrir la sesion. Pasarle el inventario haria que el boton fallara
+            # con "ese nombre ya existe" justo cuando se esta editando un
+            # equipo que, por definicion, ya esta en el inventario.
+            existentes=[],
             usuario=campos.get("usuario", ""),
             clave=clave,
         )

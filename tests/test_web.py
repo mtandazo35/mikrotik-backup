@@ -18,12 +18,19 @@ Ejecutar:  python -m tests.test_web
 """
 
 import socket
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from functools import partial
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 
 from mkbackup import web
 from mkbackup.config import Config, ErrorConfig
+from mkbackup.sesion import Sesiones, hashear
 
 FALLOS = []
 
