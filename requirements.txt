@@ -1,0 +1,7 @@
+paramiko>=3.4.0
+PyYAML>=6.0
+
+# Opcional: solo para el alta masiva de equipos desde el panel web (leer y
+# generar la plantilla .xlsx, ver mkbackup/importar.py). El respaldo funciona
+# sin ella; sin openpyxl la importacion sigue disponible en CSV.
+# openpyxl>=3.1.0

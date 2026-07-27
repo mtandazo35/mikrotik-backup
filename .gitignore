@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Configuracion real y datos generados. La barra inicial limita el patron a la
+# raiz: sin ella tambien se ignorarian examples/inventory.csv y similares.
+/config.yaml
+/inventory.csv
+/datos/
+/respaldos/
+*.log
+
+# Estado del simulador de pruebas
+tests/.dns_simulado
