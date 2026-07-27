@@ -57,6 +57,7 @@ from .inventory import (
     guardar,
     validar_equipo,
 )
+from . import imagen
 from .planificador import estado_programador, pedir_ciclo
 from .sesion import COOKIE, Sesiones
 from .store import Almacen
@@ -115,6 +116,21 @@ MAXIMO_FORMULARIO = 8 * 1024
 # Un inventario de 300 equipos en xlsx no llega a 100 KB. El margen es amplio,
 # pero acotado: esto lo sube alguien por HTTP y se lee entero en memoria.
 MAXIMO_SUBIDA = 4 * 1024 * 1024
+
+# La imagen de fondo tiene su propio tope, mas alto: la idea es que se pueda
+# subir la foto tal como sale del movil o de la camara y que el sistema la
+# ajuste (ver imagen.py). Una foto de movil son 3-8 MB y una de reflex puede
+# pasar de 20, asi que con 4 MB habia que editarla antes, que es justo lo que
+# se queria evitar.
+#
+# Sigue habiendo tope, y alto no quiere decir libre: esto se lee ENTERO en
+# memoria antes de tocarlo, y son varios hilos a la vez. 30 MB por subida es
+# caro pero asumible; sin limite, tres peticiones simultaneas se llevan por
+# delante un servidor de 2 GB.
+#
+# Ojo si hay un proxy delante: nginx corta en client_max_body_size (1 MB por
+# defecto) y devolveria un 413 suyo antes de que esto llegue a verse.
+MAXIMO_IMAGEN = 30 * 1024 * 1024
 
 # Tipos de imagen que se aceptan como fondo del login. Lista blanca: el tipo
 # que se declara sale de la EXTENSION, no del contenido, asi que se limita a
@@ -1850,9 +1866,14 @@ class Manejador(BaseHTTPRequestHandler):
             largo = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             largo = -1
-        if largo < 0 or largo > MAXIMO_SUBIDA:
+        if largo < 0 or largo > MAXIMO_IMAGEN:
             self.close_connection = True
-            self._error(413, "La imagen es demasiado grande.")
+            self._error(
+                413,
+                f"La imagen pasa de {MAXIMO_IMAGEN // (1024 * 1024)} MB. "
+                "Hasta ese tamano se ajusta sola; por encima hay que reducirla "
+                "antes.",
+            )
             return
 
         frontera = tipo.split("boundary=", 1)[1].strip().strip(chr(34)).encode()
@@ -1864,6 +1885,10 @@ class Manejador(BaseHTTPRequestHandler):
 
         # El tipo se decide por el CONTENIDO. La extension de lo que suba
         # alguien no es una fuente de verdad: renombrar es gratis.
+        #
+        # Se comprueba ANTES de pasarsela a Pillow, y no despues ni en su lugar:
+        # decodificar es meter bytes de un desconocido en codigo C, y no hay por
+        # que hacerlo con un archivo que ya se sabe que no es una imagen.
         real = _tipo_real(datos)
         if not real:
             self._fondo_error(
@@ -1873,6 +1898,25 @@ class Manejador(BaseHTTPRequestHandler):
             return
 
         extension = {v: k for k, v in TIPOS_IMAGEN.items()}[real]
+
+        # Se ajusta al tamano que hace falta: 1920 px de ancho y unos cientos de
+        # KB. La imagen se descarga entera antes de que aparezca el formulario
+        # de entrada, asi que lo que pese se paga en cada login.
+        nota = ""
+        try:
+            datos, ext_nueva, nota = imagen.ajustar(datos)
+            if ext_nueva:
+                extension = ext_nueva
+        except imagen.ErrorImagen as exc:
+            self._fondo_error(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            # Que falle el ajuste no puede impedir poner un fondo: se guarda lo
+            # que se subio, que es lo que pasaba antes de que esto existiera.
+            log.warning("No se pudo ajustar la imagen de fondo: %s", exc,
+                        exc_info=True)
+            nota = ("No se pudo ajustar el tamano, asi que se guardo tal cual. "
+                    "Si tarda en aparecer el formulario, subela mas pequena.")
         # El nombre del archivo lo decide el panel, no quien sube: asi no hay
         # forma de escribir fuera de la carpeta de datos ni de pisar otra cosa.
         destino = Path(self.cfg.almacen.ajustes).parent / f"fondo-login{extension}"
@@ -1901,8 +1945,9 @@ class Manejador(BaseHTTPRequestHandler):
         )
         self._anotar("ajustes", f"fondo del login ({real}, {len(datos) // 1024} KB)")
         self._ajustes_ok(
-            f"Fondo guardado ({len(datos) // 1024} KB). Recarga la pantalla de "
-            "entrada para verlo."
+            f"Fondo guardado ({len(datos) // 1024} KB)."
+            + (f" {nota}" if nota else "")
+            + " Recarga la pantalla de entrada para verlo."
         )
 
     def _ajustes_fondo_quitar(self) -> None:

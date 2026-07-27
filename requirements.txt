@@ -5,3 +5,8 @@ PyYAML>=6.0
 # generar la plantilla .xlsx, ver mkbackup/importar.py). El respaldo funciona
 # sin ella; sin openpyxl la importacion sigue disponible en CSV.
 # openpyxl>=3.1.0
+
+# Opcional: ajustar la imagen de fondo del login al subirla (redimensionar,
+# comprimir y quitarle los metadatos, ver mkbackup/imagen.py). Sin ella el
+# panel funciona igual: la imagen se guarda tal cual y el formulario lo avisa.
+# Pillow>=10.0.0

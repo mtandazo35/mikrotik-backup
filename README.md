@@ -1328,9 +1328,10 @@ python -m tests.test_device       # clasificacion de fallos, export, credenciale
 python -m tests.test_paginas      # el HTML servido, bien formado (CSS, JS, escapado)
 python -m tests.test_web          # de donde viene la peticion y cuanto aguanta
 python -m tests.test_panel        # el panel levantado: cada formulario se envia
+python -m tests.test_imagen       # ajuste del fondo, metadatos y bombas de zip
 ```
 
-**1121 comprobaciones** entre los trece archivos, todas en verde hoy. No
+**1144 comprobaciones** entre los catorce archivos, todas en verde hoy. No
 requieren ningún equipo ni red: `test_device` levanta un socket local que
 acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
 MikroTik con la lista de direcciones puesta.
@@ -1350,13 +1351,14 @@ alguna vez con el servidor contestando 200.
 | `test_sesion` | 76 |
 | `test_historial` | 161 |
 | `test_importar` | 95 |
-| `test_planificador` | 92 |
+| `test_planificador` | 95 |
 | `test_usuarios` | 259 |
 | `test_hechos` | 38 |
 | `test_device` | 43 |
 | `test_paginas` | 147 |
 | `test_web` | 22 |
-| `test_panel` | 47 |
+| `test_imagen` | 23 |
+| `test_panel` | 36 |
 
 ### Probar el flujo completo sin hardware
 

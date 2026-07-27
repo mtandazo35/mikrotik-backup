@@ -98,11 +98,16 @@ paso "Preparando el entorno de Python"
 [ -d "$DESTINO/.venv" ] || python3 -m venv "$DESTINO/.venv"
 "$DESTINO/.venv/bin/pip" install --quiet --upgrade pip
 "$DESTINO/.venv/bin/pip" install --quiet -r "$FUENTE/requirements.txt"
-# Opcional: solo la usa la importacion de .xlsx desde el navegador. Si falla
-# (por ejemplo sin salida a internet), no es motivo para abortar la
-# instalacion: el resto del sistema funciona igual.
+# Opcionales. Si fallan (por ejemplo sin salida a internet) NO se aborta la
+# instalacion: el sistema funciona sin las dos, solo con menos comodidades, y
+# quedarse sin panel por no poder leer un Excel seria un mal negocio.
 "$DESTINO/.venv/bin/pip" install --quiet openpyxl 2>/dev/null ||
   aviso "openpyxl no se pudo instalar; la importacion sera solo de .csv."
+# Ajusta la imagen de fondo del login al subirla: la reduce, la comprime y le
+# quita los metadatos. Sin ella la imagen se guarda tal cual y el formulario
+# avisa de que hay que subirla ya pequena.
+"$DESTINO/.venv/bin/pip" install --quiet Pillow 2>/dev/null ||
+  aviso "Pillow no se pudo instalar; el fondo del login se guardara tal cual."
 
 # --- Configuracion ----------------------------------------------------------
 paso "Configuracion"

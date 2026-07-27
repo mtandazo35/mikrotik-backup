@@ -1766,6 +1766,24 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
         vista = ('<p class="sub">Ahora mismo la pantalla de entrada no tiene '
                  "imagen de fondo.</p>")
 
+    from . import imagen as _img
+
+    if _img.disponible():
+        pista_imagen = (
+            "JPG, PNG, WebP o AVIF, del tamano que sea. Se ajusta sola a "
+            f"{_img.ANCHO_MAXIMO} px de ancho y se le quitan los metadatos "
+            "(una foto de movil lleva dentro la ubicacion, y esta imagen se "
+            "sirve sin pedir clave). Se comprueba el contenido, no el nombre."
+        )
+    else:
+        pista_imagen = (
+            "JPG, PNG, WebP o AVIF. Se comprueba el contenido, no el nombre. "
+            "Se guarda TAL CUAL: en este servidor no esta instalada Pillow, "
+            "asi que no se puede ajustar el tamano. Cuanto mas pese, mas tarda "
+            "en aparecer el formulario de entrada: por debajo de 500 KB no se "
+            "nota, y 1920 px de ancho sobran."
+        )
+
     bloque_fondo = f"""
     <p class="sub">La imagen que se ve detras del formulario al entrar.</p>
     {vista}
@@ -1775,9 +1793,7 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
         <label for="fondo">Subir una imagen</label>
         <input id="fondo" type="file" name="archivo"
                accept="image/jpeg,image/png,image/webp,image/avif" required>
-        <div class="pista">JPG, PNG, WebP o AVIF. Se comprueba el contenido, no
-             el nombre. Cuanto mas pese, mas tarda en aparecer el formulario:
-             por debajo de 500 KB no se nota, y 1920 px de ancho sobran.</div>
+        <div class="pista">{pista_imagen}</div>
       </div>
       <button type="submit">Guardar el fondo</button>
     </form>
