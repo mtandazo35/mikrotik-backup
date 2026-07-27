@@ -50,6 +50,25 @@ class ErrorEquipo(Exception):
         self.mensaje = mensaje
 
 
+# --- La excepcion que no se ve venir ----------------------------------------
+# Cuando el otro extremo cierra el socket A MITAD de un read(), paramiko no
+# lanza SSHException: lanza EOFError pelado desde packet.read_all(). Y EOFError
+# NO hereda de SSHException ni de OSError, asi que un bloque que solo mire esas
+# dos la deja escapar. Es facil olvidarlo porque es la unica excepcion de red de
+# todo paramiko que cuelga directamente de Exception.
+#
+# Escaparse aqui no es un detalle cosmetico: quien llama (cli) solo sabe
+# reintentar lo que llega envuelto en ErrorEquipo, asi que una excepcion cruda
+# se traduce en "no se reintenta". Y un enlace WAN que se cae a media sesion es
+# JUSTO el fallo que se arregla solo volviendo a intentarlo.
+#
+# Va como constante y no repetida en cada except para que la proxima excepcion
+# de esta familia se anada en un sitio y la vean todos los puntos que hablan por
+# la red. ConnectionResetError ya cae en OSError, pero se nombra aqui para que
+# el trato de "la conexion se corto" no dependa del orden de los except.
+CONEXION_CORTADA = (EOFError, ConnectionResetError, BrokenPipeError)
+
+
 @dataclass
 class Resultado:
     equipo: Equipo
@@ -378,7 +397,20 @@ class Conexion:
 
     def __enter__(self) -> "Conexion":
         cliente = paramiko.SSHClient()
-        cliente.load_system_host_keys()
+        try:
+            cliente.load_system_host_keys()
+        except (OSError, paramiko.SSHException) as exc:
+            # Estaba fuera de todo try: un known_hosts ilegible o con una linea
+            # corrupta lanzaba aqui y la excepcion salia cruda de Conexion. Eso
+            # no afecta a un equipo, afecta a la flota ENTERA (el archivo es el
+            # mismo para todos), asi que conviene que salga clasificado y con el
+            # nombre del archivo en el mensaje en vez de como un traceback
+            # repetido 300 veces.
+            raise ErrorEquipo(
+                TipoError.HOST_KEY,
+                self._limpio(f"no se pudo leer el known_hosts del sistema: {exc}"),
+            ) from exc
+
         if self.cfg.ssh.host_key_desconocida == "aceptar":
             cliente.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         else:
@@ -430,6 +462,19 @@ class Conexion:
                 TipoError.TIMEOUT,
                 f"sin respuesta en {self.cfg.ssh.timeout}s",
             ) from exc
+        except CONEXION_CORTADA as exc:
+            # Aqui la red de seguridad de mas abajo ya la tapaba, pero la
+            # etiquetaba DESCONOCIDO. Un equipo que corta durante el saludo o el
+            # intercambio de claves (un firewall que mata la sesion, un router
+            # saturado) es SIN_CONEXION, y eso es lo que hay que leer en la
+            # alerta para saber por donde empezar a mirar.
+            raise ErrorEquipo(
+                TipoError.SIN_CONEXION,
+                self._limpio(
+                    f"el equipo corto la conexion durante el saludo SSH: "
+                    f"{type(exc).__name__}"
+                ),
+            ) from exc
         except (socket.error, OSError) as exc:
             raise ErrorEquipo(
                 TipoError.SIN_CONEXION, self._limpio(f"no se pudo conectar: {exc}")
@@ -475,12 +520,34 @@ class Conexion:
             salida = out.read().decode("utf-8", errors="replace")
             error = err.read().decode("utf-8", errors="replace").strip()
         except socket.timeout as exc:
+            # Antes que OSError a proposito: socket.timeout ES TimeoutError, que
+            # hereda de OSError, asi que el orden inverso se lo tragaria.
             raise ErrorEquipo(
                 TipoError.TIMEOUT, f"'{visible}' no respondio a tiempo"
+            ) from exc
+        except CONEXION_CORTADA as exc:
+            # SIN_CONEXION y no COMANDO: el comando no fallo, ni el equipo se
+            # quejo de el; lo que se fue fue el enlace. Etiquetarlo como COMANDO
+            # mandaria a quien lee la alerta a revisar permisos y sintaxis de
+            # RouterOS cuando el problema esta en la red. Y no TIMEOUT: un
+            # timeout es "esta ahi pero no contesta", esto es "ya no esta".
+            raise ErrorEquipo(
+                TipoError.SIN_CONEXION,
+                self._limpio(
+                    f"la conexion se corto ejecutando '{visible}': "
+                    f"{type(exc).__name__}"
+                ),
             ) from exc
         except paramiko.SSHException as exc:
             raise ErrorEquipo(
                 TipoError.COMANDO, self._limpio(f"'{visible}' fallo: {exc}")
+            ) from exc
+        except OSError as exc:
+            # Un reset o un "host unreachable" a media sesion llega como OSError
+            # y sin esto se colaba igual que EOFError.
+            raise ErrorEquipo(
+                TipoError.SIN_CONEXION,
+                self._limpio(f"se perdio la conexion ejecutando '{visible}': {exc}"),
             ) from exc
 
         if error and "bad command name" in error.lower():
@@ -599,7 +666,17 @@ class Conexion:
 
         try:
             sftp = self._cliente.open_sftp()
-        except paramiko.SSHException as exc:
+        except CONEXION_CORTADA as exc:
+            # Abrir el subsistema SFTP es otro viaje de ida y vuelta por la red:
+            # si el enlace se cayo mientras se generaba el .backup (que tarda
+            # bastante en un equipo cargado), se entera aqui. SIN_CONEXION, no
+            # COMANDO: mandar a nadie a revisar la policy 'ftp' cuando lo que
+            # paso es que se corto el enlace es hacerle perder la tarde.
+            raise ErrorEquipo(
+                TipoError.SIN_CONEXION,
+                f"la conexion se corto al abrir SFTP: {type(exc).__name__}",
+            ) from exc
+        except (paramiko.SSHException, OSError) as exc:
             raise ErrorEquipo(
                 TipoError.COMANDO,
                 f"no se pudo abrir SFTP (revisa que el usuario tenga policy 'ftp'): {exc}",
@@ -608,18 +685,38 @@ class Conexion:
         try:
             with sftp.open(remoto, "rb") as fh:
                 datos = fh.read()
-        except IOError as exc:
+        except CONEXION_CORTADA as exc:
+            # Descargar el .backup es la transferencia mas larga de toda la
+            # sesion, o sea la que mas tiempo pasa expuesta a que se caiga el
+            # enlace. Sin esta rama, EOFError salia cruda justo en el punto donde
+            # mas probable era.
+            raise ErrorEquipo(
+                TipoError.SIN_CONEXION,
+                f"la conexion se corto descargando {remoto}: {type(exc).__name__}",
+            ) from exc
+        except (IOError, paramiko.SSHException, paramiko.SFTPError) as exc:
+            # SFTPError va explicito porque NO hereda de SSHException ni de
+            # OSError: cuelga de Exception, igual que EOFError.
             raise ErrorEquipo(
                 TipoError.COMANDO,
                 f"no se pudo descargar {remoto}: {exc}",
             ) from exc
         finally:
             # Nunca dejar el backup en el equipo: ocupa espacio y es sensible.
+            #
+            # Se traga CUALQUIER excepcion, no solo IOError: esto corre en un
+            # finally, asi que si el enlace ya se corto (EOFError) tanto remove()
+            # como close() vuelven a fallar, y una excepcion lanzada desde aqui
+            # SUSTITUIRIA al ErrorEquipo bien clasificado que estaba subiendo.
+            # Se perderia el diagnostico real y, de paso, el reintento.
             try:
                 sftp.remove(remoto)
-            except IOError:
+            except Exception:  # noqa: BLE001
+                log.debug("%s: no se pudo borrar %s del equipo", self.equipo, remoto)
+            try:
+                sftp.close()
+            except Exception:  # noqa: BLE001
                 pass
-            sftp.close()
 
         if not datos:
             raise ErrorEquipo(TipoError.COMANDO, "el archivo .backup vino vacio")

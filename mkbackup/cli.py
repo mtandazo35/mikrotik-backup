@@ -216,29 +216,49 @@ def _respaldar_con_reintentos(
             estado.equipo_inicia(equipo.nombre, intento)
             return equipo, respaldar(equipo, cfg), None
         except ErrorEquipo as exc:
-            ultimo = exc
-            # Reintentar unas credenciales rechazadas solo gasta tiempo y
-            # acerca el equipo a un bloqueo por intentos fallidos.
-            if exc.tipo is TipoError.AUTENTICACION:
-                log.warning("%s: %s (no se reintenta)", equipo, exc.mensaje)
-                break
-            if intento < cfg.reintentos:
-                espera = cfg.espera_reintento * intento
-                log.warning(
-                    "%s: %s (intento %d/%d, reintento en %ds)",
-                    equipo, exc.mensaje, intento, cfg.reintentos, espera,
-                )
-                estado.equipo_reintenta(equipo.nombre, intento, exc.mensaje)
-                time.sleep(espera)
-            else:
-                log.error("%s: %s (agotados %d intentos)", equipo, exc.mensaje, cfg.reintentos)
+            fallo = exc
         except Exception as exc:  # noqa: BLE001
             # Un equipo raro no debe tumbar la ejecucion de los otros 299.
-            log.exception("%s: error inesperado", equipo)
-            ultimo = ErrorEquipo(
+            #
+            # El traceback solo en el primer intento: si lo que falla es un bug
+            # nuestro, fallara los tres, y volcar la misma pila tres veces por
+            # equipo llena el log de copias sin anadir un dato.
+            if intento == 1:
+                log.exception("%s: error inesperado", equipo)
+            fallo = ErrorEquipo(
                 TipoError.DESCONOCIDO, f"{type(exc).__name__}: {exc}"
             )
+
+        ultimo = fallo
+
+        # LA UNICA excepcion a la regla de reintentar. Reintentar unas
+        # credenciales rechazadas solo gasta tiempo y acerca el equipo a un
+        # bloqueo por intentos fallidos: la respuesta no va a cambiar entre el
+        # primer intento y el tercero, porque el que dice que no es el equipo y
+        # lo dice a proposito.
+        if fallo.tipo is TipoError.AUTENTICACION:
+            log.warning("%s: %s (no se reintenta)", equipo, fallo.mensaje)
             break
+
+        # Ojo con lo de arriba: DESCONOCIDO tambien se reintenta, y antes no.
+        # El camino del 'except Exception' hacia un break, o sea que un fallo
+        # que NO supimos clasificar era el unico, junto con el de credenciales,
+        # que se rendia al primer golpe. Esta al reves: un error sin clasificar
+        # es justo del que menos se sabe, y el mas comun de todos ellos es una
+        # sesion que se corta a media conversacion (paramiko lanza EOFError
+        # pelado), que es el caso en el que reintentar SI arregla las cosas.
+        # Con un enlace WAN inestable, rendirse ahi es perder el respaldo de un
+        # equipo que estaba perfectamente accesible dos segundos despues.
+        if intento < cfg.reintentos:
+            espera = cfg.espera_reintento * intento
+            log.warning(
+                "%s: %s (intento %d/%d, reintento en %ds)",
+                equipo, fallo.mensaje, intento, cfg.reintentos, espera,
+            )
+            estado.equipo_reintenta(equipo.nombre, intento, fallo.mensaje)
+            time.sleep(espera)
+        else:
+            log.error("%s: %s (agotados %d intentos)", equipo, fallo.mensaje, cfg.reintentos)
 
     return equipo, None, ultimo
 
