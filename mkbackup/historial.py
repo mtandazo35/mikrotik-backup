@@ -91,6 +91,11 @@ class Version:
     mensaje: str
     lineas_mas: int
     lineas_menos: int
+    # Como se llamaba el archivo EN ESE COMMIT. No es lo mismo que como se
+    # llama hoy: un equipo renombrado tiene versiones guardadas bajo su nombre
+    # anterior, y pedirle a git el contenido de un commit viejo con la ruta de
+    # ahora no devuelve nada. Vacia = la de siempre.
+    ruta: str = ""
 
 
 @dataclass
@@ -303,6 +308,30 @@ def _numero(texto: str) -> int:
         return 0
 
 
+# git, cuando detecta un renombre, no escribe la ruta a secas en --numstat:
+# escribe de donde a donde se movio, comprimiendo la parte comun. Las dos formas
+# que emite son:
+#
+#   carpeta/{viejo.rsc => nuevo.rsc}      (con prefijo o sufijo comun)
+#   carpeta/viejo.rsc => otra/nuevo.rsc   (sin nada en comun)
+#
+# Aqui interesa SIEMPRE el lado derecho: es como se llama el archivo DESPUES de
+# ese commit, que es la ruta con la que hay que pedirle a git su contenido en
+# ese punto. Quedarse con el izquierdo devolveria el archivo de antes del
+# renombrado, o sea la version equivocada, y sin dar ningun error.
+_RENOMBRE_LLAVES = re.compile(r"\{([^{}]*) => ([^{}]*)\}")
+
+
+def _ruta_del_commit(camino: str) -> str:
+    """La ruta tal como queda tras ese commit, deshaciendo la notacion de git."""
+    camino = camino.strip()
+    if "{" in camino and " => " in camino:
+        return _RENOMBRE_LLAVES.sub(lambda m: m.group(2), camino)
+    if " => " in camino:
+        return camino.split(" => ", 1)[1].strip()
+    return camino
+
+
 def _registros(salida: str):
     """Trocea la salida de `git log FORMATO --numstat` en (Version, archivos).
 
@@ -359,9 +388,18 @@ def versiones(repo, ruta_relativa: str, maximo: int = 50) -> list[Version]:
         repo,
         "log",
         "--no-color",
-        # Sin deteccion de renombres: con ella numstat emite rutas del tipo
-        # "viejo => nuevo", que no sirven para volver a consultar el archivo.
-        "--no-renames",
+        # --follow y no --no-renames. Este es EL detalle del renombrado: sin
+        # seguir el archivo a traves de sus cambios de nombre, el panel ensena
+        # una sola version (la del propio renombrado) de un equipo que llevaba
+        # meses respaldandose, y quien lo mira concluye, con toda la razon, que
+        # renombrar borra el historial. En git no se pierde nada; lo que se
+        # perdia era la forma de verlo, que para quien lo usa es lo mismo.
+        #
+        # Se le quito por un motivo REAL: con deteccion de renombres, numstat
+        # emite la ruta como "carpeta/{viejo.rsc => nuevo.rsc}", que no sirve
+        # para volver a pedirle el archivo a git. La solucion no era renunciar
+        # al historial, sino entender esa notacion (ver _ruta_del_commit).
+        "--follow",
         f"--max-count={maximo}",
         "--numstat",
         FORMATO,
@@ -375,9 +413,11 @@ def versiones(repo, ruta_relativa: str, maximo: int = 50) -> list[Version]:
         # El log ya viene filtrado por la ruta, pero un commit de merge o un
         # cambio de modo pueden no traer numstat: la version se emite igual,
         # con los contadores a cero, porque existir existe.
-        for _, mas, menos in archivos:
+        for camino, mas, menos in archivos:
             version.lineas_mas += mas
             version.lineas_menos += menos
+            if not version.ruta:
+                version.ruta = _ruta_del_commit(camino)
         resultado.append(version)
 
     return resultado

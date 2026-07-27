@@ -1665,16 +1665,30 @@ def historial(equipo: str, ruta: str, versiones, hay_diferencias: bool, zona=Non
     filas = []
     for v in versiones:
         celda = esc(v.commit)
+        # La ruta de CADA version, no la de ahora. Un equipo renombrado tiene
+        # versiones guardadas bajo su nombre anterior, y pedirle a git el
+        # contenido de un commit viejo con el nombre de hoy no devuelve nada:
+        # el enlace llevaria a un 404 en su propio historial.
+        camino = getattr(v, "ruta", "") or ruta
         if hay_diferencias:
             celda = (
-                f'<a href="/diferencia?ruta={esc(ruta)}&commit={esc(v.commit)}">'
+                f'<a href="/diferencia?ruta={esc(camino)}&commit={esc(v.commit)}'
+                f'&equipo={esc(equipo)}">'
                 f"<code>{esc(v.commit)}</code></a>"
+            )
+        # Cuando la version es de otro nombre, se dice: si no, el historial
+        # ensena commits que hablan de un equipo que quien mira no reconoce.
+        nombre_viejo = ""
+        if camino != ruta:
+            nombre_viejo = (
+                f'<br><span class="sub">se llamaba '
+                f"{esc(camino.split('/')[-1].removesuffix('.rsc'))}</span>"
             )
         filas.append(
             f"<tr><td>{esc(fecha(v.fecha, zona))}</td><td>{celda}</td>"
             f'<td><span style="color:var(--ok)">+{esc(v.lineas_mas)}</span> '
             f'<span style="color:var(--fallo)">-{esc(v.lineas_menos)}</span></td>'
-            f"<td>{esc(v.mensaje)}</td></tr>"
+            f"<td>{esc(v.mensaje)}{nombre_viejo}</td></tr>"
         )
     if not filas:
         filas.append(

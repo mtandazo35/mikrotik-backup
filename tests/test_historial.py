@@ -320,6 +320,7 @@ def main() -> None:
         comprobar("el ultimo cambio cuenta 2 altas y 1 baja",
                   v[0].lineas_mas == 2 and v[0].lineas_menos == 1)
 
+
         # --- limite maximo -------------------------------------------------
         comprobar("maximo=1 devuelve una sola version",
                   len(versiones(repo, RUTA, maximo=1)) == 1)
@@ -421,6 +422,79 @@ def main() -> None:
         # --- enmascarado y seguridad ---------------------------------------
         probar_enmascarado()
         probar_seguridad(repo)
+
+        # --- El equipo renombrado -------------------------------------------
+        # ESTE es el caso por el que existe --follow. Sin el, el panel ensenaba
+        # UNA version (la del propio renombrado) de un equipo que llevaba meses
+        # respaldandose, y quien lo miraba concluia, con toda la razon, que
+        # renombrar borra el historial. En git no se pierde nada; lo que se
+        # perdia era la forma de verlo, que para quien lo usa es lo mismo.
+        print("\n--- un equipo renombrado conserva su historial ---")
+        antes_de_renombrar = versiones(repo, RUTA, maximo=500)
+        comprobar(f"antes de renombrar hay historial que perder "
+                  f"({len(antes_de_renombrar)} versiones)",
+                  len(antes_de_renombrar) >= 3)
+
+        NUEVA = "acme/bts/BTS-Norte-01b.rsc"
+        git(repo, "mv", "--", RUTA, NUEVA)
+        git(repo, "commit", "-q", "-m",
+            f"Renombrado: {RUTA[:-4]} -> {NUEVA[:-4]}")
+        commitear(repo, NUEVA, V3 + "/ip service set ssh port=2222\n",
+                  "Cambio: acme/bts/BTS-Norte-01b (RouterOS 7.14)")
+
+        tras = versiones(repo, NUEVA, maximo=500)
+        # Se compara con las versiones que habia ANTES de renombrar, y no
+        # contra un numero escrito a mano: las pruebas de arriba van dejando
+        # commits sobre este mismo archivo, y un numero fijo aqui se rompe cada
+        # vez que se anade una comprobacion mas arriba. Que es justo lo que
+        # paso al escribir esto.
+        comprobar(f"tras renombrar salen todas las de antes, mas las dos "
+                  f"nuevas ({len(antes_de_renombrar)} -> {len(tras)})",
+                  len(tras) == len(antes_de_renombrar) + 2)
+        comprobar("y ninguna de las anteriores se ha perdido por el camino",
+                  {x.commit for x in antes_de_renombrar} <= {x.commit for x in tras})
+        comprobar("entre ellas sigue estando el alta original",
+                  any(x.mensaje.startswith("Alta:") for x in tras))
+        comprobar("y el commit del alta es el MISMO de antes, no uno nuevo",
+                  tras[-1].commit == antes_de_renombrar[-1].commit)
+
+        # Cada version tiene que decir con que ruta pedirle el contenido a git:
+        # las anteriores al renombrado viven bajo el nombre viejo, y pedirlas
+        # con el de ahora no devuelve nada.
+        comprobar("cada version trae la ruta que tenia en ESE commit",
+                  all(x.ruta for x in tras))
+        comprobar("las anteriores al renombrado apuntan al nombre viejo",
+                  tras[-1].ruta == RUTA)
+        comprobar("y las de despues, al nuevo",
+                  tras[0].ruta == NUEVA)
+        comprobar("la del propio renombrado apunta ya al nombre nuevo",
+                  any(x.ruta == NUEVA and "Renombrado" in x.mensaje
+                      for x in tras))
+
+        # Y esas rutas tienen que SERVIR: es lo que hace el enlace del panel.
+        vieja = next(x for x in tras if x.ruta == RUTA)
+        comprobar("con la ruta de su commit, la version antigua se puede leer",
+                  bool(diferencia(repo, vieja.ruta, vieja.commit, True)))
+
+        # La notacion que emite git al detectar un renombre.
+        from mkbackup.historial import _ruta_del_commit
+        for entrada, espera, motivo in (
+            ("acme/{viejo.rsc => nuevo.rsc}", "acme/nuevo.rsc",
+             "con la parte comun comprimida"),
+            ("{acme => otra}/equipo.rsc", "otra/equipo.rsc",
+             "cuando lo que cambia es la carpeta"),
+            ("acme/viejo.rsc => otra/nuevo.rsc", "otra/nuevo.rsc",
+             "sin nada en comun"),
+            ("acme/normal.rsc", "acme/normal.rsc", "sin renombre"),
+        ):
+            comprobar(f"se entiende la ruta {motivo}",
+                      _ruta_del_commit(entrada) == espera)
+
+        # Se coge el lado DERECHO, no el izquierdo: el izquierdo devolveria el
+        # archivo de antes del renombrado, o sea la version equivocada, y sin
+        # dar ningun error.
+        comprobar("del renombre se toma el destino, no el origen",
+                  _ruta_del_commit("a/{x.rsc => y.rsc}") == "a/y.rsc")
 
     print()
     if FALLOS:

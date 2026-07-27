@@ -988,8 +988,34 @@ class Manejador(BaseHTTPRequestHandler):
         # ensenaria su configuracion entera.
         equipos, _ = self._inventario_tolerante()
         duenyo = next((e for e in equipos if e.ruta_relativa == ruta), None)
+
         if duenyo is None:
-            if not self.usuario.alcance.todo:
+            # La ruta no esta en el inventario. Puede ser de un equipo
+            # RENOMBRADO: sus versiones anteriores viven bajo el nombre viejo,
+            # y sin esto quien no lo ve todo se encontraba un 404 en el
+            # historial de su propio equipo, que es exactamente el "se pierde
+            # todo" que se venia a arreglar.
+            #
+            # El historial manda ademas de que equipo es. Con eso se comprueba
+            # el alcance sobre el equipo de VERDAD y despues que la ruta pedida
+            # sea una de las suyas segun git. Lo segundo es lo que impide que
+            # esto se convierta en un agujero: no basta con nombrar un equipo
+            # propio para leer un archivo cualquiera del repositorio.
+            actual = next(
+                (e for e in equipos if e.nombre == consulta.get("equipo", "")),
+                None,
+            )
+            if actual is not None and self._alcanzable(actual):
+                historicas = {
+                    v.ruta for v in hist.versiones(
+                        self.cfg.almacen.git, actual.ruta_relativa,
+                        self.cfg.web.historial_maximo,
+                    ) if v.ruta
+                }
+                if ruta in historicas:
+                    duenyo = actual
+
+            if duenyo is None and not self.usuario.alcance.todo:
                 self._error(404, "No hay ninguna version con esa ruta.")
                 return
         elif not self._alcanzable(duenyo):
