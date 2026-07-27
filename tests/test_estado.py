@@ -149,6 +149,23 @@ def main() -> None:
         comprobar("el historial conserva sus cifras",
                   historial[0]["cambios"] == 1 and historial[0]["fallidos"] == 1)
 
+        # 8b. Y no crece sin fin. Este archivo lo lee el panel cada pocos
+        #     segundos, asi que cada fila de mas se paga en cada refresco; y en
+        #     pantalla, una tabla larga hace que no se lea ninguna fila.
+        ruta_larga = base / "muchas.json"
+        for i in range(HISTORIAL := est.HISTORIAL_MAXIMO + 8):
+            e = est.Estado(ruta_larga)
+            e.iniciar(equipos(1))
+            e.terminar(duracion=float(i), codigo=0)
+        guardadas = est.leer(ruta_larga)["historial"]
+        comprobar(f"tras {HISTORIAL} ejecuciones se guardan solo "
+                  f"{est.HISTORIAL_MAXIMO} ({len(guardadas)})",
+                  len(guardadas) == est.HISTORIAL_MAXIMO)
+        comprobar("son las mas RECIENTES, no las primeras",
+                  guardadas[0]["duracion"] > guardadas[-1]["duracion"])
+        comprobar("y el tope son 10, que es lo que cabe de un vistazo",
+                  est.HISTORIAL_MAXIMO == 10)
+
         # 9. Concurrencia: las transiciones llegan desde los hilos del pool.
         ruta3 = base / "paralelo.json"
         e4 = est.Estado(ruta3)

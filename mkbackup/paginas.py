@@ -295,6 +295,27 @@ ESTILO = """
   .hero .grafica { margin-top: 1rem; }
 
   .grafica { display: flex; flex-direction: column; gap: .85rem; }
+
+  /* Las dos tartas, una al lado de otra mientras quepan. */
+  .tartas { display: grid; gap: 1rem; margin-bottom: 1rem;
+            grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .grafica-tarta { display: flex; gap: 1.3rem; align-items: center;
+                   flex-wrap: wrap; }
+  .grafica-tarta svg { width: 170px; height: 170px; flex: none; }
+  /* El hueco entre sectores va del color del panel, no de un borde: un borde
+     alrededor de cada sector engorda la tarta y ensucia los colores. */
+  .grafica-tarta svg path, .grafica-tarta svg circle {
+    stroke: var(--panel); stroke-width: 2; }
+  .grafica-tarta svg path { transition: opacity .12s ease; }
+  .grafica-tarta svg path:hover { opacity: .8; }
+  .centro-cifra { font-size: 1.5rem; font-weight: 650; fill: var(--texto);
+                  letter-spacing: -.02em; }
+  .centro-texto { font-size: .6rem; fill: var(--suave); letter-spacing: .06em; }
+  /* Al lado de una tarta la leyenda va en columna, no en rejilla: tiene que
+     caber en lo que sobra a la derecha del circulo. */
+  .leyenda-lista { display: block !important; flex: 1; min-width: 165px; }
+  .leyenda-lista li { border-bottom: 1px solid var(--borde); }
+  .leyenda-lista li:last-child { border-bottom: 0; }
   /* La barra se estira a lo ancho de su caja: el viewBox mide 100 de ancho,
      asi que las coordenadas son porcentajes tal cual. */
   .barra { width: 100%; height: 16px; display: block; overflow: visible; }
@@ -814,6 +835,100 @@ function leerPaleta() {
   CLAVES.forEach(k => PAL[k] = s.getPropertyValue("--" + k).trim());
 }
 
+// --- Graficas ---------------------------------------------------------------
+// Hay DOS formas aqui y no sobra ninguna:
+//
+//   - la BARRA de arriba responde "cuanta flota esta cubierta": es una parte
+//     contra un total, y eso se lee de un vistazo en una barra. En un circulo
+//     habria que comparar angulos para distinguir un 3% de un 8%, que es justo
+//     el numero que importa cuando algo va mal.
+//   - las TARTAS responden "como se reparte": el peso de cada estado y el de
+//     cada cliente, uno al lado del otro. Es lo que se mira cuando ya se sabe
+//     que algo pasa y toca ver por donde.
+//
+// Se quitaron en un rediseno y el usuario las echo en falta, con razon: la
+// barra contesta mejor una pregunta, pero no contesta la otra.
+
+// Luminancia relativa (WCAG), para decidir si el porcentaje dentro de un
+// sector se escribe en negro o en blanco. Sin esto, un 62% blanco sobre el
+// amarillo del tema claro es ilegible.
+function luz(hex) {
+  const c = hex.replace("#", "");
+  if (c.length < 6) return 1;
+  const v = [0, 2, 4].map(i => {
+    const x = parseInt(c.substr(i, 2), 16) / 255;
+    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+}
+
+function punto(r, frac) {
+  const a = frac * Math.PI * 2 - Math.PI / 2;   // 0 = las 12 en punto
+  return [(85 + r * Math.cos(a)).toFixed(2), (85 + r * Math.sin(a)).toFixed(2)];
+}
+
+const RADIO = 76, HUECO = 47;
+
+function tarta(idSvg, idLeyenda, series, etiquetaCentro) {
+  const svg = document.getElementById(idSvg);
+  const leyenda = document.getElementById(idLeyenda);
+  const total = series.reduce((s, x) => s + x.valor, 0);
+
+  if (!total) {
+    svg.innerHTML = `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}"
+      fill="none" stroke="var(--barra)" stroke-width="${RADIO - HUECO}"/>`;
+    leyenda.innerHTML = '<li class="sin-datos">Sin datos todavia.</li>';
+    return;
+  }
+
+  const vivas = series.filter(s => s.valor > 0);
+  let trozos = "", filas = "", acumulado = 0;
+
+  for (const s of vivas) {
+    const frac = s.valor / total;
+    const pct = Math.round(frac * 100);
+    const f0 = acumulado, f1 = acumulado + frac;
+    acumulado = f1;
+
+    if (vivas.length === 1) {
+      // Un solo sector: un arco de 360 grados no se puede dibujar (inicio y
+      // fin caen en el mismo punto y el trazo sale vacio). Se pinta el anillo
+      // como un circulo con borde grueso.
+      trozos += `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}" fill="none"
+        stroke="${s.color}" stroke-width="${RADIO - HUECO}"><title>${escapar(s.etq)}:
+        ${s.valor} (100%)</title></circle>`;
+    } else {
+      const grande = frac > 0.5 ? 1 : 0;
+      const [xa, ya] = punto(RADIO, f0), [xb, yb] = punto(RADIO, f1);
+      const [xc, yc] = punto(HUECO, f1), [xd, yd] = punto(HUECO, f0);
+      trozos += `<path d="M ${xa} ${ya} A ${RADIO} ${RADIO} 0 ${grande} 1 ${xb} ${yb}
+        L ${xc} ${yc} A ${HUECO} ${HUECO} 0 ${grande} 0 ${xd} ${yd} Z"
+        fill="${s.color}"><title>${escapar(s.etq)}: ${s.valor} (${pct}%)</title></path>`;
+    }
+
+    // El porcentaje solo se escribe dentro si el sector da de si; en uno
+    // estrecho el texto se saldria o se recortaria, y para eso esta la
+    // leyenda, que lleva el numero exacto de todas formas.
+    if (frac >= 0.09) {
+      const [xt, yt] = punto((RADIO + HUECO) / 2, f0 + frac / 2);
+      const tinta = luz(s.color) > 0.45 ? "#0b0b0b" : "#ffffff";
+      trozos += `<text x="${xt}" y="${yt}" fill="${tinta}" font-size="12"
+        font-weight="600" text-anchor="middle" dominant-baseline="central"
+        >${pct}%</text>`;
+    }
+
+    filas += `<li><span class="marca" style="background:${s.color}"></span>
+      <span class="nom" title="${escapar(s.etq)}">${escapar(s.etq)}</span>
+      <span class="val">${s.valor} &middot; ${pct}%</span></li>`;
+  }
+
+  svg.innerHTML = trozos + `
+    <text x="85" y="80" class="centro-cifra" text-anchor="middle">${total}</text>
+    <text x="85" y="97" class="centro-texto" text-anchor="middle"
+      >${escapar(etiquetaCentro)}</text>`;
+  leyenda.innerHTML = filas;
+}
+
 // --- Barra apilada ----------------------------------------------------------
 // Sustituye a las dos tartas que habia, y no por gusto:
 //
@@ -1062,12 +1177,14 @@ function pintar(d) {
     alarma.textContent = cuantosEq + (clientes.length > 1 ? deCuantos : "");
   }
 
-  barra("b-estado", "l-estado", [
+  const porEstado = [
     { etq: "Sin cambios", valor: bien, color: PAL["v-bien"] },
     { etq: "Con cambios", valor: conCambio, color: PAL["v-cambio"] },
     { etq: "Fallidos", valor: fallidos, color: PAL["v-fallo"] },
     { etq: "Sin respaldar", valor: sinRespaldar, color: PAL["v-nada"] },
-  ], "Todavia no se ha respaldado nada.");
+  ];
+  barra("b-estado", "l-estado", porEstado, "Todavia no se ha respaldado nada.");
+  tarta("t-estado", "l-tarta-estado", porEstado, "equipos");
 
   // Los recuadros se quedan solo con el CONTEXTO: cuanta flota hay y cuando
   // toca la proxima vuelta. El resultado del respaldo ya lo cuenta el bloque de
@@ -1111,7 +1228,7 @@ function pintar(d) {
       color: PAL.v5,
     });
   }
-  barra("b-clientes", "l-clientes", serieClientes, "Sin equipos todavia.");
+  tarta("t-clientes", "l-clientes", serieClientes, "equipos");
 
   const orden = { fallo: 0, en_curso: 1, cambio: 2, pendiente: 3, sin_cambios: 4 };
   // Los mismos equipos que ya se contaron arriba, ordenados para la tabla:
@@ -1201,13 +1318,22 @@ def panel(sesion, refresco: int, zona: str = "America/Guayaquil") -> str:
     <div class="cifras" id="cifras"></div>
   </div>
 
-  <div class="tarjeta">
-    <h2>Equipos por cliente</h2>
-    <div class="grafica">
-      <svg id="b-clientes" class="barra" viewBox="0 0 100 16"
-           preserveAspectRatio="none" role="img"
-           aria-label="Reparto de equipos por cliente"></svg>
-      <ul class="leyenda" id="l-clientes"></ul>
+  <div class="tartas">
+    <div class="tarjeta">
+      <h2>Resultado del ultimo respaldo</h2>
+      <div class="grafica-tarta">
+        <svg id="t-estado" viewBox="0 0 170 170" role="img"
+             aria-label="Resultado del ultimo respaldo por equipo"></svg>
+        <ul class="leyenda leyenda-lista" id="l-tarta-estado"></ul>
+      </div>
+    </div>
+    <div class="tarjeta">
+      <h2>Equipos por cliente</h2>
+      <div class="grafica-tarta">
+        <svg id="t-clientes" viewBox="0 0 170 170" role="img"
+             aria-label="Reparto de equipos por cliente"></svg>
+        <ul class="leyenda leyenda-lista" id="l-clientes"></ul>
+      </div>
     </div>
   </div>
 

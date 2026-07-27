@@ -329,6 +329,26 @@ def main() -> None:
         comprobar(f"login {nombre}: ni un relleno lateral que lo desplace "
                   f"{laterales[:1] or ''}", not laterales)
 
+    # --- Las graficas del panel, las dos formas -----------------------------
+    # Las tartas se quitaron en un rediseno "porque una barra se lee mejor", y
+    # el usuario las echo en falta. Tenia razon: la barra contesta "cuanta
+    # flota esta cubierta" y las tartas contestan "como se reparte", que no es
+    # la misma pregunta. Se comprueba que estan las dos cosas para que no
+    # vuelva a desaparecer ninguna en la proxima limpieza.
+    print()
+    panel_html = pg.panel(SESION, 3, "America/Guayaquil")
+    for id_svg, que in (("b-estado", "la barra de cobertura"),
+                        ("t-estado", "la tarta del resultado"),
+                        ("t-clientes", "la tarta por cliente")):
+        comprobar(f"el panel trae {que}", f'id="{id_svg}"' in panel_html)
+    for id_ul in ("l-estado", "l-tarta-estado", "l-clientes"):
+        comprobar(f"y su leyenda ({id_ul})", f'id="{id_ul}"' in panel_html)
+    # Cada grafica necesita su propia leyenda: si dos compartieran id, la
+    # segunda pisaria a la primera y una de las dos se quedaria en blanco.
+    ids = re.findall(r'id="(l-[\w-]+)"', panel_html)
+    comprobar(f"ninguna leyenda comparte id con otra {ids}",
+              len(ids) == len(set(ids)))
+
     print()
     if FALLOS:
         print(f"{len(FALLOS)} prueba(s) fallaron:")
