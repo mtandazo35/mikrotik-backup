@@ -249,6 +249,9 @@ ESTILO = """
      alinear columnas. */
   .cifra b { display: block; font-size: 1.65rem; font-weight: 650;
              letter-spacing: -.025em; line-height: 1.15; }
+  /* Solo para los fallos, y solo cuando los hay: el numero se pinta en rojo
+     porque ahi el color SI significa algo. La etiqueta lo dice igualmente. */
+  .cifra.malo b { color: var(--fallo); }
   .cifra span { color: var(--suave); font-size: .74rem; text-transform: uppercase;
                 letter-spacing: .05em; display: block; margin-top: .15rem; }
 
@@ -1004,6 +1007,31 @@ function pintar(d) {
   const sinRespaldar = equipos.length - bien - conCambio - fallidos;
   const clientes = [...new Set(equipos.map(e => e.empresa))];
 
+  // Clientes con algo fallando, y clientes con todo bien. NO es lo mismo que
+  // contar equipos: 12 equipos caidos pueden ser un solo cliente sin enlace
+  // (una llamada) o doce clientes distintos (doce llamadas, y un problema de
+  // otra naturaleza). Para un ISP esa diferencia es la que decide a quien hay
+  // que avisar, y hasta ahora habia que deducirla mirando la tabla equipo a
+  // equipo.
+  //
+  // Un cliente cuenta como fallido si le falla AL MENOS UN equipo: no se hacen
+  // medias. Que a un cliente le funcionen 9 de 10 no es "un 90% bien", es un
+  // equipo suyo sin respaldo.
+  const conFallo = new Set(
+    equipos.filter(e => e.estado === "fallo").map(e => e.empresa)
+  );
+  // "Pendiente" es distinto de "fallido": todavia no se ha intentado, asi que
+  // no hay nada que avisar. Se cuenta aparte para no inflar los fallos con
+  // equipos que solo estan esperando su turno.
+  const conPendiente = new Set(
+    equipos.filter(e => e.estado !== "fallo"
+                     && e.estado !== "sin_cambios"
+                     && e.estado !== "cambio").map(e => e.empresa)
+  );
+  const clientesFallo = conFallo.size;
+  const clientesPendiente = [...conPendiente].filter(n => !conFallo.has(n)).length;
+  const clientesBien = clientes.length - clientesFallo - clientesPendiente;
+
   // LA cifra de la pagina: que parte de la flota esta respaldada. Antes esto
   // habia que deducirlo comparando dos recuadros ("Equipos 300" y "Respaldados
   // 287"), y con un solo equipo los dos ponian "1", que no dice nada.
@@ -1016,6 +1044,9 @@ function pintar(d) {
   document.getElementById("hero-cifra").textContent = equipos.length ? pct + "%" : "-";
   document.getElementById("hero-detalle").textContent = equipos.length
     ? `${respaldados} de ${equipos.length} equipos respaldados`
+      + (clientes.length > 1
+         ? `, en ${clientesBien} de ${clientes.length} clientes sin ninguna incidencia`
+         : "")
     : "Todavia no hay equipos en el inventario";
 
   // El aviso de fallos aparece SOLO si hay alguno. Un "0 fallidos" permanente
@@ -1025,9 +1056,15 @@ function pintar(d) {
   const alarma = document.getElementById("hero-alarma");
   alarma.hidden = !fallidos;
   if (fallidos) {
-    alarma.textContent = fallidos === 1
+    const cuantosEq = fallidos === 1
       ? "1 equipo no se pudo respaldar"
       : `${fallidos} equipos no se pudieron respaldar`;
+    // A cuantos CLIENTES afecta es la mitad del dato: doce equipos de un
+    // cliente es una llamada; doce equipos de doce clientes es otra cosa.
+    const deCuantos = clientesFallo === 1
+      ? ", de 1 cliente"
+      : `, de ${clientesFallo} clientes`;
+    alarma.textContent = cuantosEq + (clientes.length > 1 ? deCuantos : "");
   }
 
   barra("b-estado", "l-estado", [
@@ -1041,10 +1078,18 @@ function pintar(d) {
   // toca la proxima vuelta. El resultado del respaldo ya lo cuenta el bloque de
   // arriba, y tenerlo en los dos sitios obligaba a mirar dos veces lo mismo.
   document.getElementById("cifras").innerHTML = [
-    ["Clientes", clientes.length],
-    ["Equipos", equipos.length],
-    ["Proximo ciclo", proximo],
-  ].map(([t, v]) => `<div class="cifra"><b>${escapar(v)}</b>` +
+    ["Clientes", clientes.length, ""],
+    // El desglose por cliente solo aparece cuando dice algo: con todos bien,
+    // un "0 con fallos" permanente ensena a no mirar ese sitio.
+    ...(clientesFallo
+        ? [["Clientes con fallos", clientesFallo, "malo"]] : []),
+    ...(clientesPendiente
+        ? [["Clientes pendientes", clientesPendiente, ""]] : []),
+    ...(clientesFallo || clientesPendiente
+        ? [["Clientes al dia", clientesBien, ""]] : []),
+    ["Equipos", equipos.length, ""],
+    ["Proximo ciclo", proximo, ""],
+  ].map(([t, v, clase]) => `<div class="cifra ${clase}"><b>${escapar(v)}</b>` +
         `<span>${t}</span></div>`).join("");
 
   const porCliente = {};

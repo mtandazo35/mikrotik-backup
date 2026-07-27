@@ -476,6 +476,36 @@ def main() -> None:
         comprobar("con la ruta de su commit, la version antigua se puede leer",
                   bool(diferencia(repo, vieja.ruta, vieja.commit, True)))
 
+
+        # --- Y si lo que cambia es la EMPRESA -------------------------------
+        # Otro caso distinto: aqui no cambia el nombre del archivo, cambia la
+        # CARPETA, porque la empresa encabeza la ruta dentro del repositorio.
+        # git lo emite con otra notacion ("{acme => otra}/equipo.rsc") y si esa
+        # no se entendiera, el historial se perderia igual: un cliente que
+        # cambia de razon social o un equipo que se traspasa a otra empresa son
+        # cosas que pasan de verdad en un ISP.
+        OTRA_EMPRESA = "otracorp/bts/BTS-Norte-01b.rsc"
+        antes_del_traspaso = versiones(repo, NUEVA, maximo=500)
+        (repo / "otracorp" / "bts").mkdir(parents=True, exist_ok=True)
+        git(repo, "mv", "--", NUEVA, OTRA_EMPRESA)
+        git(repo, "commit", "-q", "-m",
+            f"Renombrado: {NUEVA[:-4]} -> {OTRA_EMPRESA[:-4]}")
+
+        traspasado = versiones(repo, OTRA_EMPRESA, maximo=500)
+        comprobar(f"cambiar de empresa conserva el historial "
+                  f"({len(antes_del_traspaso)} -> {len(traspasado)})",
+                  len(traspasado) == len(antes_del_traspaso) + 1)
+        comprobar("incluido el alta, de hace tres nombres y dos empresas",
+                  traspasado[-1].commit == antes_del_traspaso[-1].commit)
+        comprobar("las versiones viejas apuntan a la carpeta de la empresa vieja",
+                  traspasado[-1].ruta.startswith("acme/"))
+        comprobar("y las nuevas, a la nueva",
+                  traspasado[0].ruta.startswith("otracorp/"))
+        vieja_empresa = next(x for x in traspasado if x.ruta.startswith("acme/"))
+        comprobar("y esas versiones se pueden leer con su ruta de entonces",
+                  bool(diferencia(repo, vieja_empresa.ruta, vieja_empresa.commit,
+                                  True)))
+
         # La notacion que emite git al detectar un renombre.
         from mkbackup.historial import _ruta_del_commit
         for entrada, espera, motivo in (
