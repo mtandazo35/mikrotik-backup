@@ -106,9 +106,11 @@ Verificado:
 - Normalización del export, detección de cambios, git, retención de binarios y
   lectura de inventarios sucios (`tests/test_limpieza.py`, `tests/test_almacen.py`)
 - **Flujo completo por SSH** contra `tests/simulador_routeros.py`: conexión,
-  autenticación, `/export`, limpieza, commit. Cuatro ejecuciones seguidas
-  producen **dos** commits — el alta y un cambio real de DNS — y las dos
-  ejecuciones sin cambios no tocan el repo
+  autenticación, `/export`, limpieza, commit. Cuatro ejecuciones seguidas dejan
+  **dos** commits de respaldo —el alta y un cambio real de DNS—, porque una
+  ejecución que no encuentra ningún cambio no genera commit. (El repositorio
+  arranca con su propio commit de creación, así que `git log` enseña tres
+  líneas en total.)
 - **Alta con nombre automático**: un equipo dado de alta sin nombre responde su
   `/system identity` y entra con él; el que no responde entra con su IP y el
   primer respaldo correcto lo renombra solo, moviendo su histórico con `git mv`
@@ -122,8 +124,8 @@ Verificado:
   auditoría, ajustes)
 - **Intervalo por equipo**: a quién le toca, herencia del intervalo general,
   descuento del ciclo y suelo del tic (`tests/test_planificador.py`)
-- Manejo de equipo inalcanzable: respeta el timeout, reintenta y sale con
-  código 1 sin colgarse
+- Manejo de equipo inalcanzable: respeta el timeout, reintenta (`reintentos`,
+  `espera_reintento`) y sale con código 1 sin colgarse
 
 Sin verificar todavía, hace falta hardware:
 
@@ -182,7 +184,9 @@ Con 300 equipos × ~100 KB diarios serían ~11 GB al año de objetos irrepetible
 y se perdería justo lo que se busca: que el repo contenga solo cambios reales.
 
 Solución: el `.rsc` va a git, y el `.backup` a disco con retención por equipo,
-regenerado únicamente cuando el texto delató un cambio de verdad.
+regenerado únicamente cuando el texto delató un cambio de verdad
+(`backup_binario.solo_si_cambio`). Si no quieres binarios en absoluto,
+`backup_binario.activo: false`.
 
 ## Cómo detecta "solo cambios"
 
@@ -198,7 +202,9 @@ RouterOS mete en el export líneas que cambian siempre aunque no cambie nada:
 Sin filtrarlas, **cada respaldo parece un cambio**: el repo se llena de commits
 vacíos y las alertas dejan de leerse por ruido. `mkbackup` las normaliza antes
 de comparar (ver `limpiar_export` en `mkbackup/device.py`), y solo escribe y
-commitea si el resultado difiere del anterior.
+commitea si el resultado difiere del anterior. El export se pide además en modo
+`terse` (`export.terse`, por defecto `true`): una línea por comando, que es lo
+que hace legibles los diffs.
 
 Las pruebas de `tests/test_limpieza.py` cubren esto en ambas direcciones: que el
 ruido no cuente como cambio, y que un cambio real sí se detecte.
@@ -356,7 +362,8 @@ CCR-Borde-Quito,Fibra Austral S.A.,192.168.88.1,,quito,1440,usuario-de-ejemplo,c
 El lector tolera lo que sale de Excel (CRLF, BOM, espacios) y **avisa de cada
 línea que corrige o descarta**: nombres duplicados que se pisarían, puertos
 fuera de rango, y el error clásico de apuntar a 8291 (Winbox) o 8728/8729 (API)
-en vez de al puerto SSH.
+en vez de al puerto SSH. La fila que deja `puerto` vacío hereda
+`ssh.puerto_defecto` (22).
 
 Los inventarios escritos antes de que existieran las tres últimas columnas
 **siguen cargando**: esas filas quedan con el intervalo general y con las
@@ -503,8 +510,8 @@ scp andinanet-telecomunicaciones/BTS-Norte-01.rsc Respaldo@10.20.30.11:
 ssh Respaldo@10.20.30.11 "/import BTS-Norte-01.rsc"
 
 # Equipo entero (binario) — incluye certificados y claves
-scp BTS-Norte-01_20260725_120000_123.backup admin@10.20.30.11:
-ssh admin@10.20.30.11 "/system backup load name=BTS-Norte-01_20260725_120000_123"
+scp BTS-Norte-01_20260725_120000_123456.backup admin@10.20.30.11:
+ssh admin@10.20.30.11 "/system backup load name=BTS-Norte-01_20260725_120000_123456"
 ```
 
 Restaura con la **misma versión de RouterOS** con la que se hizo el respaldo:
@@ -528,6 +535,9 @@ sigue sin hacer, y por qué, está al final de esta sección.
 .venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml --web
 # http://127.0.0.1:8080/
 ```
+
+Dónde escucha sale de `web.direccion` y `web.puerto`; la pantalla de Estado se
+repinta sola cada `web.refresco` segundos (3 por defecto).
 
 La navegación tiene seis secciones —Estado, Equipos, Cambios, Usuarios,
 Auditoría, Ajustes— y **cada una aparece solo si la cuenta tiene su permiso**.
@@ -1164,9 +1174,10 @@ forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
   cabeza puesta y mirando la versión de RouterOS.
 - **No edita las rutas ni la configuración general.** Solo la lista blanca de
   `AJUSTES_EDITABLES`. Las rutas del repositorio, el remoto de replicación y
-  Telegram viven en `config.yaml`, que se toca con un editor y con root. El
-  panel escribe únicamente bajo `/root/mkbackup`: el inventario, los ajustes,
-  las cuentas, la auditoría y la imagen de fondo del login.
+  Telegram (`telegram.token`, `telegram.chat_id` y `telegram.modo`: `resumen`,
+  `detalle` o `ninguno`) viven en `config.yaml`, que se toca con un editor y
+  con root. El panel escribe únicamente bajo `/root/mkbackup`: el inventario,
+  los ajustes, las cuentas, la auditoría y la imagen de fondo del login.
 - **No enseña los secretos de las configuraciones.** El diff los tapa (ver
   arriba). Se ve qué cambió, no lo que dice.
 - **No tiene HTTPS propio, ni API REST, ni 2FA, ni recuperación de clave por
@@ -1294,6 +1305,7 @@ Los archivos de datos, todos bajo `/root/mkbackup`:
 | `ajustes.json` | Lo que se cambia desde el panel | el panel |
 | `usuarios.json` | Cuentas, roles y hashes | el panel |
 | `auditoria.log` | Un evento por línea | el panel |
+| `fondo-login.<ext>` | La imagen de fondo del login, si se subió una | el panel |
 
 Detalle de concurrencia: los equipos se consultan **en paralelo** (lo lento es
 la red) pero se guardan **en serie**, porque git no admite dos escrituras
@@ -1346,7 +1358,10 @@ python -m mkbackup.cli --sin-binario          # 2a vez: "0 con cambios"
 echo "1.1.1.1" > tests/.dns_simulado          # cambio real
 python -m mkbackup.cli --sin-binario          # detecta el cambio
 
-git -C datos/configs.git log --oneline        # deben ser 2 commits, no 3
+# 3 líneas: "Repositorio de configuraciones" (el commit que crea el repo),
+# el "Alta:" y el "Cambio:". Solo dos son respaldos: las ejecuciones sin
+# cambios no dejan nada.
+git -C datos/configs.git log --oneline
 ```
 
 Ese `.dns_simulado` cambia la configuración que sirve el simulador en caliente,

@@ -87,7 +87,7 @@ almacen:
   # escribe el respaldo y lo lee el panel para las columnas de la tabla.
   hechos: /root/mkbackup/equipos.json
   # Remoto opcional. Si los respaldos llevan secretos (mostrar_secretos: true),
-  # usar un remoto cifrado — ver la seccion de replicacion del README.
+  # usar un remoto cifrado - ver la seccion de replicacion del README.
   remoto: ""
   autor: mkbackup
   email: mkbackup@localhost
@@ -119,7 +119,11 @@ planificador:
   # la aplica encima de este archivo en cada vuelta. Si cambias el valor aqui y
   # no ves el efecto, es que hay un ajuste guardado desde el panel.
 
-# Panel de solo lectura para ver si el respaldo esta corriendo. Se levanta
+# Panel para ver como va el respaldo y gestionar la flota. Ya NO es de solo
+# lectura: escribe el inventario (altas y ediciones), los ajustes que se cambian
+# desde la web, las cuentas del panel, el registro de auditoria y el fondo del
+# login. Por eso todos esos archivos tienen que estar en una ruta donde el
+# servicio pueda ESCRIBIR (ver la seccion almacen: de mas arriba). Se levanta
 # aparte (mkbackup-web.service); el respaldo no lo necesita para funcionar.
 web:
   # 127.0.0.1 = solo desde el propio servidor (por defecto, y lo mas seguro).
@@ -141,12 +145,39 @@ web:
   # Cuanto dura la sesion antes de volver a pedir la clave.
   sesion_horas: 8
   # Imagen de fondo de la pantalla de entrada (ruta a un archivo del disco).
-  # Vacio = sin fondo. Formatos: jpg, png, webp, avif o svg. Conviene que no
-  # pase de 1-2 MB: se descarga entera antes de que se vea el formulario.
+  # Vacio = sin fondo. Formatos: jpg, png, webp o avif. Conviene que no pase de
+  # 1-2 MB: se descarga entera antes de que se vea el formulario.
+  # NADA de SVG, aunque sea una imagen: un SVG puede llevar <script> dentro y
+  # el panel sirve el fondo en /fondo, o sea en su MISMO origen, asi que ese
+  # codigo se ejecutaria con la sesion de quien abriera la pagina. Un formato
+  # que ademas es un documento ejecutable no entra en la lista blanca.
   # OJO: se sirve SIN pedir login (es el fondo de la propia pantalla de
   # entrada), asi que cualquiera que llegue al panel puede verla. No pongas ahi
   # nada que no quieras ensenar.
   fondo_login: ""
+
+  # --- Que deja hacer el panel ---------------------------------------------
+  # Ver que cambio y cuando, leyendo el historial de git. En false el panel
+  # sigue listando las versiones de cada equipo, pero desaparece el enlace para
+  # abrir el diff y /diferencia responde 403: se sabe QUE dia se toco un equipo,
+  # no QUE linea. Util cuando el panel lo miran manos que no deben leer la
+  # configuracion entera.
+  ver_diferencias: true
+  # Con export.mostrar_secretos: true el repositorio lleva passwords PPPoE, PSK
+  # de wireless y secrets de VPN. Esto los tapa en los diffs que ensena el
+  # panel: se sigue viendo que la linea cambio, sin repartir las credenciales
+  # de la red a todo el que tenga una cuenta. Ponerlo en false es una decision
+  # consciente, no un descuido, y el panel avisa en el log al arrancar.
+  ocultar_secretos: true
+  # Cuantas versiones se listan por equipo, y cuantos cambios se ensenan en
+  # /cambios. Es un limite de PANTALLA, no de retencion: git conserva todo el
+  # historico igual, esto solo evita que un equipo con anos de cambios genere
+  # una pagina interminable.
+  historial_maximo: 50
+  # Dar de alta y editar equipos desde el panel. En false el inventario solo se
+  # toca por archivo y el panel vuelve a ser de solo lectura sobre la flota:
+  # lo que quieres si el CSV lo genera otro sistema y nadie debe pisarlo a mano.
+  editar_inventario: true
 
   # Cuantos eventos se ensenan por pagina en el registro de auditoria.
   eventos_por_pagina: 30

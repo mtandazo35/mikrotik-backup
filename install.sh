@@ -17,7 +17,12 @@ set -euo pipefail
 
 REPO="${MKBACKUP_REPO:-https://github.com/mtandazo35/mikrotik-backup.git}"
 RAMA="${MKBACKUP_RAMA:-main}"
-DESTINO="${MKBACKUP_DESTINO:-/root/mkbackup}"
+# La ruta NO es configurable, y es a proposito: config.example.yaml y las dos
+# unidades de systemd llevan /root/mkbackup escrito dentro. Ofrecer una
+# variable que no reescribe nada de eso dejaba el codigo en un sitio y los
+# servicios apuntando a otro, o sea un sistema muerto que ademas parecia
+# instalado. Para otra ruta, la instalacion manual del README.
+DESTINO="/root/mkbackup"
 FUENTE="$DESTINO/app"
 
 rojo() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
@@ -43,7 +48,16 @@ if [ -e "$DESTINO" ] && [ ! -d "$DESTINO" ]; then
 fi
 
 ACTUALIZANDO=no
-[ -d "$FUENTE/.git" ] && ACTUALIZANDO=si
+if [ -d "$FUENTE/.git" ]; then
+  ACTUALIZANDO=si
+elif [ -d "$FUENTE" ] && [ -n "$(ls -A "$FUENTE" 2>/dev/null)" ]; then
+  # git clone sobre un directorio con cosas dentro falla con un error suyo que
+  # no dice como salir del paso. Pasa de verdad: alguien cuya instalacion se
+  # corto a medias y lo vuelve a intentar.
+  morir "$FUENTE existe y tiene contenido, pero no es un clon de git.
+    Si es de una instalacion a medias, borralo y vuelve a lanzar esto:
+        rm -rf $FUENTE"
+fi
 
 if [ "$ACTUALIZANDO" = si ]; then
   aviso "Ya hay una instalacion en $DESTINO: se actualiza sin tocar los datos."
@@ -66,7 +80,12 @@ mkdir -p "$DESTINO"
 chmod 700 "$DESTINO"
 
 if [ "$ACTUALIZANDO" = si ]; then
-  git -C "$FUENTE" fetch --quiet origin "$RAMA"
+  # Refspec explicito: el clon inicial es --depth 1 --branch <rama>, y su
+  # refspec solo trae ESA rama. Un `fetch origin otra-rama` a secas "funciona"
+  # pero nunca crea refs/remotes/origin/otra-rama, y el reset siguiente muere
+  # con "ambiguous argument" dejando los servicios con el codigo viejo.
+  git -C "$FUENTE" remote set-url origin "$REPO"
+  git -C "$FUENTE" fetch --quiet --depth 1 origin     "+refs/heads/$RAMA:refs/remotes/origin/$RAMA"
   git -C "$FUENTE" reset --quiet --hard "origin/$RAMA"
 else
   git clone --quiet --branch "$RAMA" --depth 1 "$REPO" "$FUENTE"
@@ -119,6 +138,11 @@ texto = ruta.read_text(encoding="utf-8")
 ruta.write_text(texto.replace('clave_hash: ""', f'clave_hash: "{hash_clave}"', 1),
                 encoding="utf-8")
 PY
+  # Se comprueba que la sustitucion OCURRIO. Era un replace silencioso: si la
+  # cadena exacta no estuviera en la plantilla, el script seguia adelante e
+  # imprimia en verde una clave que no valia para entrar.
+  grep -q "clave_hash: \"pbkdf2_" "$DESTINO/config.yaml" ||
+    morir "no se pudo escribir la clave en config.yaml; revisa la plantilla."
   aviso "config.yaml creado con una clave nueva para el panel."
 fi
 
@@ -136,6 +160,32 @@ fi
 # Llevan credenciales de la red: que no los lea nadie mas.
 chmod 600 "$DESTINO/config.yaml" "$DESTINO/inventory.csv"
 
+# --- El comando mkbackup ----------------------------------------------------
+paso "Instalando el comando mkbackup"
+
+# Un envoltorio de tres lineas en vez de empaquetar el proyecto con pip: el
+# codigo se actualiza con un `git reset --hard`, no reinstalando, asi que un
+# paquete instalado se quedaria viejo sin que nadie lo note.
+#
+# Que este comando exista NO es comodidad. El panel, el instalador y la
+# configuracion le dicen a quien se queda fuera que ejecute
+# `mkbackup --clave-usuario admin`; si el comando no existe, la unica salida
+# documentada de "he perdido la clave" termina en `command not found`.
+cat > /usr/local/bin/mkbackup <<ENVOLTORIO
+#!/bin/sh
+# Generado por el instalador de mkbackup. Se puede borrar sin miedo.
+cd "$FUENTE" || exit 1
+exec "$DESTINO/.venv/bin/python" -m mkbackup.cli -c "$DESTINO/config.yaml" "\$@"
+ENVOLTORIO
+chmod 755 /usr/local/bin/mkbackup
+
+# Se comprueba que responde de verdad, no solo que el archivo esta escrito.
+if mkbackup --version >/dev/null 2>&1; then
+  aviso "mkbackup $(mkbackup --version 2>&1 | awk '{print $NF}')"
+else
+  morir "el comando mkbackup no funciona; revisa $DESTINO"
+fi
+
 # --- Servicios --------------------------------------------------------------
 paso "Instalando los servicios"
 
@@ -145,16 +195,43 @@ systemctl daemon-reload
 systemctl enable --quiet --now mkbackup.service mkbackup-web.service
 sleep 1
 
+# Se espera un poco antes de mirar: con Type=simple, un servicio que muere a
+# los dos segundos todavia figura como activo en el primero, y el instalador
+# daria por bueno algo que esta entrando en bucle de reinicios.
+sleep 4
+CAIDOS=""
 for unidad in mkbackup mkbackup-web; do
   if systemctl is-active --quiet "$unidad"; then
     aviso "$unidad: en marcha"
   else
-    rojo "    $unidad: NO arranco. Mira: journalctl -u $unidad -n 30"
+    CAIDOS="$CAIDOS $unidad"
+    rojo "    $unidad: NO arranco."
   fi
 done
 
 # --- Resumen ----------------------------------------------------------------
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+# Si algo no arranco, NO se dice "Listo" ni se da la direccion del panel: eso
+# manda a la gente a un navegador en vez de al log, que es donde esta la
+# respuesta. Se sale con error para que se note tambien desde un script.
+if [ -n "$CAIDOS" ]; then
+  paso "Instalado, pero NO esta corriendo"
+  rojo "  No arrancaron:$CAIDOS"
+  cat <<MAL
+
+  El codigo y la configuracion estan puestos; lo que falla es el arranque.
+  Mira el motivo con:
+
+MAL
+  for unidad in $CAIDOS; do echo "    journalctl -u $unidad -n 30 --no-pager"; done
+  echo
+  echo "  Lo mas comun: config.yaml a medias o sin clave del panel."
+  echo "  Se comprueba con:  mkbackup --probar-config"
+  echo
+  exit 1
+fi
+
 paso "Listo"
 
 verde "  Panel:  http://127.0.0.1:8080/"
