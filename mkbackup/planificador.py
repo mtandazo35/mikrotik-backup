@@ -76,6 +76,23 @@ PAUSA_MINIMA = 60.0
 # cuesta nada al servidor.
 TIC_MINIMO = 60.0
 
+# Cada cuanto se vuelve a mirar el inventario MIENTRAS no se haya hecho ni un
+# ciclo todavia.
+#
+# Sin esto, la instalacion recien hecha se quedaba muerta cuatro horas. El
+# instalador crea inventory.csv con solo la cabecera a proposito (sembrar
+# equipos de ejemplo llena el panel de fallos que no son de nadie), asi que el
+# programador arranca SIEMPRE con el inventario vacio, no encuentra
+# vencimientos que mirar y se duerme el intervalo global. Quien acababa de
+# instalar daba de alta su flota desde el panel, no pasaba nada, y lo unico
+# que lo desatascaba era reiniciar el servicio. Es el primer cuarto de hora de
+# CADA instalacion: el peor sitio posible para que parezca que no funciona.
+#
+# Solo aplica hasta el primer ciclo. Despues manda el intervalo global otra
+# vez, que es lo que evita que un CSV roto en un sistema en marcha deje al
+# programador despertando cada minuto para nada.
+ESPERA_SIN_ESTRENAR = 30.0
+
 NOMBRE_ARCHIVO = "programador.json"
 
 # Estado que se devuelve cuando todavia no hay archivo (o esta corrupto). Las
@@ -591,7 +608,12 @@ def planificar(cfg) -> int:
         # Instante de referencia comun para la espera y para sus recalculos
         # (ver _espera_tic): los dos tienen que medir desde el mismo sitio.
         arranque = datetime.now(timezone.utc)
-        espera = _espera_tic(equipos, ultimas, intervalo_global, duracion, arranque)
+        # `primera` sigue en True mientras no haya entrado ni un equipo: es
+        # justo la instalacion recien hecha, y ahi el inventario vacio se
+        # vuelve a mirar en segundos y no dentro de un intervalo entero.
+        espera = _espera_tic(
+            equipos, ultimas, intervalo_global, duracion, arranque, primera
+        )
         if espera > 0 and _esperar(
             cfg,
             parar,
@@ -603,6 +625,7 @@ def planificar(cfg) -> int:
                 cfg.planificador.intervalo_minutos,
                 duracion,
                 arranque,
+                primera,
             ),
         ):
             break
@@ -618,6 +641,7 @@ def _espera_tic(
     intervalo_global: int,
     duracion: float,
     ahora: datetime | None = None,
+    sin_estrenar: bool = False,
 ) -> float:
     """Segundos hasta la proxima comprobacion de vencimientos.
 
@@ -627,10 +651,18 @@ def _espera_tic(
     espera en curso necesita las dos medidas desde el mismo instante.
 
     Sin inventario (vacio o ilegible) no hay vencimientos que mirar y se cae al
-    intervalo global, que es el comportamiento de siempre; asi un CSV roto no
-    deja al programador despertando cada minuto para nada.
+    intervalo global; asi un CSV roto no deja al programador despertando cada
+    minuto para nada.
+
+    `sin_estrenar` es la excepcion, y es la que hace util a una instalacion
+    nueva: mientras no se haya completado ni un ciclo, un inventario vacio se
+    vuelve a mirar en ESPERA_SIN_ESTRENAR segundos en lugar de dentro de cuatro
+    horas. Es una condicion que solo se da al principio, asi que no cambia el
+    ritmo de un sistema en marcha.
     """
     if not equipos:
+        if sin_estrenar:
+            return ESPERA_SIN_ESTRENAR
         return espera_hasta_el_turno(duracion, intervalo_global)
 
     faltan = segundos_hasta_el_proximo(

@@ -357,6 +357,26 @@ def main() -> None:
               pl._espera_tic([EquipoFalso("loco", 1)], {"loco": hace(5)},
                              240, 0.0, ahora) == pl.TIC_MINIMO)
 
+    # 6f-bis. La instalacion recien hecha. El instalador crea inventory.csv con
+    #     solo la cabecera, asi que el programador arranca SIEMPRE con el
+    #     inventario vacio. Con la regla de arriba a secas se dormia el
+    #     intervalo global entero: quien acababa de instalar daba de alta su
+    #     flota desde el panel y no pasaba nada durante cuatro horas.
+    comprobar("recien instalado y sin equipos, se vuelve a mirar en segundos",
+              pl._espera_tic([], {}, 240, 0.0, ahora, True)
+              == pl.ESPERA_SIN_ESTRENAR)
+    comprobar("y eso es MUCHO menos que el intervalo global",
+              pl.ESPERA_SIN_ESTRENAR < pl.espera_hasta_el_turno(0.0, 240))
+    comprobar("pero en un sistema ya estrenado manda el intervalo de siempre",
+              pl._espera_tic([], {}, 240, 0.0, ahora, False)
+              == pl.espera_hasta_el_turno(0.0, 240))
+    comprobar("y por defecto (sin decir nada) se comporta como siempre",
+              pl._espera_tic([], {}, 240, 0.0, ahora)
+              == pl.espera_hasta_el_turno(0.0, 240))
+    comprobar("con equipos ya no aplica: manda el vencimiento mas proximo",
+              pl._espera_tic([core], {"core": hace(1)}, 240, 0.0, ahora, True)
+              == (30 - 1) * 60)
+
     # 6g. Enlace con el inventario real: el planificador tiene que leer la
     #     columna del Equipo de verdad, no solo la del doble de prueba.
     campos = {c.name for c in dataclasses.fields(inventory.Equipo)}
