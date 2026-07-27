@@ -506,6 +506,30 @@ def main() -> None:
                   bool(diferencia(repo, vieja_empresa.ruta, vieja_empresa.commit,
                                   True)))
 
+
+        # --- Lo que el panel debe ENSENAR de todo eso ----------------------
+        # Tras varios renombrados, la mayoria de las versiones son commits sin
+        # una sola linea tocada: el archivo se movio, la configuracion del
+        # router es identica. Su diff esta vacio, y en la pantalla entierran a
+        # los cambios de verdad, que es lo unico que se viene a mirar.
+        from mkbackup import paginas
+
+        html = paginas.historial("BTS-Norte-01b", OTRA_EMPRESA, traspasado,
+                                 True, sesion={"puede": set()})
+        con_contenido = [x for x in traspasado if x.lineas_mas or x.lineas_menos]
+        sin_contenido = len(traspasado) - len(con_contenido)
+        comprobar(f"hay versiones sin cambios que ocultar ({sin_contenido})",
+                  sin_contenido >= 2)
+        for x in con_contenido:
+            comprobar(f"se sigue viendo el cambio {x.commit}",
+                      x.commit in html)
+        for x in traspasado:
+            if not (x.lineas_mas or x.lineas_menos):
+                comprobar(f"no se lista el renombrado {x.commit}",
+                          x.commit not in html)
+        comprobar("y se dice cuantas se ocultaron, para que no parezca que faltan",
+                  f"No se listan {sin_contenido}" in html)
+
         # La notacion que emite git al detectar un renombre.
         from mkbackup.historial import _ruta_del_commit
         for entrada, espera, motivo in (

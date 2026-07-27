@@ -1707,8 +1707,22 @@ def cambios(
 
 def historial(equipo: str, ruta: str, versiones, hay_diferencias: bool, zona=None,
               sesion=None) -> str:
+    # Las versiones sin una sola linea tocada no se listan. Son los
+    # renombrados: git guarda un commit porque el archivo se movio, pero la
+    # configuracion del router es identica, asi que su enlace lleva a un diff
+    # vacio. Con un equipo que ha cambiado de nombre o de empresa un par de
+    # veces, esas filas son mayoria y entierran los cambios de verdad, que es
+    # lo unico que se viene a mirar aqui.
+    #
+    # No se pierde el dato: de que se llamo cada version se sigue diciendo al
+    # lado de los cambios que si tienen contenido, y quien renombro que y
+    # cuando esta en Auditoria.
+    con_cambios = [v for v in versiones
+                   if (v.lineas_mas or v.lineas_menos)]
+    ocultas = len(versiones) - len(con_cambios)
+
     filas = []
-    for v in versiones:
+    for v in con_cambios:
         celda = esc(v.commit)
         # La ruta de CADA version, no la de ahora. Un equipo renombrado tiene
         # versiones guardadas bajo su nombre anterior, y pedirle a git el
@@ -1737,8 +1751,21 @@ def historial(equipo: str, ruta: str, versiones, hay_diferencias: bool, zona=Non
         )
     if not filas:
         filas.append(
-            '<tr><td colspan="4" class="vacio">Este equipo todavia no tiene '
-            "ningun respaldo guardado.</td></tr>"
+            '<tr><td colspan="4" class="vacio">'
+            + ("Este equipo todavia no tiene ningun respaldo guardado."
+               if not ocultas else
+               "Este equipo no ha cambiado de configuracion desde que se dio "
+               "de alta.")
+            + "</td></tr>"
+        )
+
+    nota_ocultas = ""
+    if ocultas:
+        nota_ocultas = (
+            f'<p class="leyenda-diff">No se listan {ocultas} version(es) sin '
+            "cambios de configuracion: son renombrados del equipo o de su "
+            "empresa, que mueven el archivo dentro del repositorio pero no "
+            "tocan el router. Quien las hizo y cuando esta en Auditoria.</p>"
         )
     cuerpo = f"""
   <div class="barra-acciones">
@@ -1753,6 +1780,7 @@ def historial(equipo: str, ruta: str, versiones, hay_diferencias: bool, zona=Non
         <tbody>{"".join(filas)}</tbody>
       </table>
     </div>
+    {nota_ocultas}
   </div>
 """
     return envoltura(f"mkbackup - {equipo}", cuerpo, sesion, activo="cambios")
