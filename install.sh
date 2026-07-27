@@ -192,8 +192,19 @@ paso "Instalando los servicios"
 install -m 644 "$FUENTE/systemd/mkbackup.service" /etc/systemd/system/
 install -m 644 "$FUENTE/systemd/mkbackup-web.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --quiet --now mkbackup.service mkbackup-web.service
-sleep 1
+systemctl enable --quiet mkbackup.service mkbackup-web.service
+
+# RESTART, no `enable --now`. Esto estaba mal y era grave: `--now` solo arranca
+# lo que esta parado, asi que en una maquina que ya tenia mkbackup corriendo no
+# hacia absolutamente nada. El instalador se traia el codigo nuevo, decia
+# "Listo" con la version nueva escrita en pantalla, y los dos servicios seguian
+# ejecutando el codigo viejo hasta el proximo reinicio de la maquina.
+#
+# Y es el camino documentado para actualizar ("Actualizar: vuelve a lanzar este
+# mismo instalador"), o sea que la unica forma de aplicar un arreglo era la que
+# no lo aplicaba. Lo peor: no fallaba, mentia. Se vio al desplegar un arreglo
+# del panel y comprobar que la pagina servida seguia siendo la de antes.
+systemctl restart mkbackup.service mkbackup-web.service
 
 # Se espera un poco antes de mirar: con Type=simple, un servicio que muere a
 # los dos segundos todavia figura como activo en el primero, y el instalador
