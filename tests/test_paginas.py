@@ -299,6 +299,36 @@ def main() -> None:
     # a exigir node a quien solo quiere respaldar routers.
     ejecutar_barra()
 
+    # --- El login SIEMPRE centrado -----------------------------------------
+    # Esto se ha ido a un lado dos veces, y las dos las tuvo que ver el usuario
+    # en la pantalla porque nada lo comprobaba. Estuvo puesto a proposito (la
+    # imagen de fondo suele tener su motivo y una tarjeta en medio lo tapa),
+    # pero lo que se ve al abrir es un formulario descolgado en una esquina,
+    # que parece un fallo de maquetacion. Con fondo y sin el, va centrado.
+    print()
+    for nombre, html_login in (("sin fondo", pg.login()),
+                               ("con imagen de fondo", pg.login(fondo="abc123")),
+                               ("con error", pg.login(error="Clave incorrecta")),
+                               ("con fondo y error",
+                                pg.login(error="Clave incorrecta", fondo="abc123"))):
+        estilos = "\n".join(_bloques(html_login, "style"))
+        # justify-items: start / end / left / right en el body es lo que la
+        # descuelga. Se busca cualquiera de ellos.
+        descolgada = re.search(
+            r"justify-items\s*:\s*(start|end|left|right|flex-start|flex-end)",
+            estilos)
+        comprobar(f"login {nombre}: la tarjeta no se descuelga a un lado "
+                  f"({descolgada.group(0) if descolgada else 'centrada'})",
+                  descolgada is None)
+        comprobar(f"login {nombre}: hay un centrado explicito",
+                  re.search(r"(justify-items\s*:\s*center|place-items\s*:\s*center)",
+                            estilos) is not None)
+        # Un relleno lateral muy grande centra "dentro de una caja corrida", que
+        # a ojo se ve igual de torcido que un justify-items: start.
+        laterales = re.findall(r"padding:\s*[^;]*clamp\([^)]*vw[^)]*\)", estilos)
+        comprobar(f"login {nombre}: ni un relleno lateral que lo desplace "
+                  f"{laterales[:1] or ''}", not laterales)
+
     print()
     if FALLOS:
         print(f"{len(FALLOS)} prueba(s) fallaron:")

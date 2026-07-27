@@ -1331,7 +1331,7 @@ python -m tests.test_panel        # el panel levantado: cada formulario se envia
 python -m tests.test_imagen       # ajuste del fondo, metadatos y bombas de zip
 ```
 
-**1173 comprobaciones** entre los catorce archivos, todas en verde hoy. No
+**1185 comprobaciones** entre los catorce archivos, todas en verde hoy. No
 requieren ningún equipo ni red: `test_device` levanta un socket local que
 acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
 MikroTik con la lista de direcciones puesta.
@@ -1355,7 +1355,7 @@ alguna vez con el servidor contestando 200.
 | `test_usuarios` | 259 |
 | `test_hechos` | 38 |
 | `test_device` | 43 |
-| `test_paginas` | 147 |
+| `test_paginas` | 159 |
 | `test_web` | 22 |
 | `test_imagen` | 23 |
 | `test_panel` | 36 |

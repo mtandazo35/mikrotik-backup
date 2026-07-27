@@ -708,9 +708,16 @@ def login(error: str = "", fondo: str = "") -> str:
     """Sin navegacion ni nombre de usuario: aqui todavia no hay sesion."""
     aviso = f'<p class="error">{esc(error)}</p>' if error else ""
 
-    # Con imagen de fondo la tarjeta se va a un lado y no al centro. La imagen
-    # que se pone aqui suele tener su propio motivo (un logo, un equipo), y una
-    # tarjeta en el centro lo tapa justo. A un lado conviven las dos cosas.
+    # La tarjeta va CENTRADA, con imagen de fondo y sin ella.
+    #
+    # Estuvo a un lado, con el razonamiento de que la imagen suele tener su
+    # propio motivo (un logo, un equipo) y una tarjeta en el centro lo tapa
+    # justo. Suena bien y esta mal: lo que se ve al abrir la pagina es un
+    # formulario descolgado en una esquina, que parece un fallo de maquetacion
+    # antes que una decision. Y no es una suposicion: el usuario lo pidio
+    # centrado dos veces. Una imagen de fondo se elige para que se vea detras,
+    # no para competir con lo unico que hay que hacer en esa pantalla.
+    #
     # `fondo` no es un si/no: es una marca que cambia cuando cambia el
     # archivo. Va en la URL para que el navegador no siga sirviendo la imagen
     # vieja de su cache: la ruta es la misma, asi que sin esto una imagen
@@ -721,22 +728,22 @@ def login(error: str = "", fondo: str = "") -> str:
   body {
     background-image:
       /* Un velo oscuro DEBAJO de la tarjeta y encima de la foto. Sin el, el
-         formulario queda sobre lo que toque de la imagen y la legibilidad
-         depende de la suerte. Con degradado y no plano para que la foto se
-         siga viendo por el lado contrario. */
-      linear-gradient(100deg,
-        rgba(8,11,16,.88) 0%, rgba(8,11,16,.76) 32%,
-        rgba(8,11,16,.40) 58%, rgba(8,11,16,.22) 100%),
+         formulario queda sobre lo que toque de la imagen y que se lea depende
+         de la suerte. Ahora es parejo y no un degradado lateral: con la
+         tarjeta en el centro, aclarar un lado solo servia para que la imagen
+         cambiara de tono de un borde al otro sin motivo. Mas oscuro hacia el
+         centro, que es donde esta el formulario, y mas claro en los bordes,
+         donde la foto se ve entera. */
+      radial-gradient(ellipse at center,
+        rgba(8,11,16,.86) 0%, rgba(8,11,16,.72) 45%, rgba(8,11,16,.42) 100%),
       url("/fondo?v=__V__");
     background-size: cover, cover;
-    /* La imagen es clara de punta a punta (medida: luminosidad media 147-167
-       en las cinco franjas), asi que el velo hace falta en todas ellas; se
-       deja mas suave a la derecha, que es donde esta el motivo de marca y
-       donde la tarjeta no tapa nada. */
     background-position: center, center;
     background-repeat: no-repeat, no-repeat;
-    justify-items: start;
-    padding: 2rem clamp(1.5rem, 7vw, 6rem);
+    /* Centrada. Lo hereda del centrado general de esta pagina, pero se deja
+       escrito para que quede claro que aqui NO se cambia. */
+    justify-items: center;
+    padding: 2rem 1.5rem;
   }
   /* La tarjeta se queda opaca a proposito: nada de cristal esmerilado sobre
      una foto con tanto detalle, que es donde el texto deja de leerse. */
@@ -744,19 +751,7 @@ def login(error: str = "", fondo: str = "") -> str:
   h1, form p.sub { color: var(--texto); }
 
   @media (max-width: 760px) {
-    /* En vertical no hay sitio para poner nada al lado: la tarjeta vuelve al
-       centro y el velo se hace parejo para que se lea igual de bien. */
-    body {
-      justify-items: center;
-      background-image:
-        linear-gradient(rgba(8,11,16,.80), rgba(8,11,16,.80)), url("/fondo?v=__V__");
-      /* En vertical, `cover` recorta casi la mitad del ancho. Centrada se
-         perderia el logo de la derecha, asi que se desplaza el encuadre hacia
-         alli: se sacrifica el monitor de la izquierda, que es lo que menos
-         dice. */
-      background-position: center, 62% center;
-      padding: 1.5rem;
-    }
+    body { padding: 1.5rem; }
   }
 """
         estilo_fondo = estilo_fondo.replace("__V__", esc(fondo))
