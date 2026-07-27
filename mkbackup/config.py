@@ -349,15 +349,26 @@ class Config:
         self.aplicar_ajustes()
 
     def validar(self) -> None:
+        ruta_texto = str(self.ruta) if self.ruta else "config.yaml"
         if self.concurrencia < 1:
             raise ErrorConfig("concurrencia debe ser al menos 1")
         if self.reintentos < 1:
             raise ErrorConfig("reintentos debe ser al menos 1")
 
+        # Sin credenciales SSH la configuracion es INCOMPLETA, no invalida: se
+        # avisa y se sigue. Antes esto era un error que abortaba, y tenia
+        # sentido cuando todo se configuraba a mano en el archivo. Ahora las
+        # credenciales se ponen desde el panel, asi que abortar aqui impide
+        # arrancar justo la herramienta con la que se arreglan: recien
+        # instalado no habria forma de salir de ese agujero.
+        # Quien SI tiene que negarse es el respaldo, antes de intentar un ciclo
+        # que fallaria equipo por equipo (ver cli.ejecutar).
         if not self.ssh.password and not self.ssh.clave_privada:
-            raise ErrorConfig(
-                "hay que definir ssh.password o ssh.clave_privada; "
-                "sin credenciales no se puede entrar a los equipos"
+            logging.getLogger("mkbackup.config").warning(
+                "No hay credenciales SSH generales (ssh.password ni "
+                "ssh.clave_privada). Ponlas en el panel, en Ajustes, o en %s; "
+                "hasta entonces solo respondera el equipo que traiga las suyas.",
+                ruta_texto,
             )
 
         if self.ssh.clave_privada:

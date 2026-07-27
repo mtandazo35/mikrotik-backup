@@ -411,6 +411,20 @@ def ejecutar(
         log.error("Inventario: %s", exc)
         return 2
 
+    # Sin credenciales generales, solo se puede entrar a los equipos que traigan
+    # las suyas. Si no hay ninguno asi, el ciclo entero seria 300 fallos de
+    # autenticacion: se dice el motivo real UNA vez y no se toca ningun equipo.
+    # La configuracion ya no aborta por esto (se puede arreglar desde el panel),
+    # asi que el que tiene que negarse es el respaldo.
+    hay_generales = bool(cfg.ssh.password or cfg.ssh.clave_privada)
+    if not hay_generales and not any(e.usuario or e.clave for e in equipos):
+        log.error(
+            "No hay credenciales SSH: ni generales (ssh.password / "
+            "ssh.clave_privada) ni propias de ningun equipo. Ponlas en el "
+            "panel, en Ajustes, antes de respaldar."
+        )
+        return 2
+
     for aviso in avisos:
         log.warning("Inventario %s", aviso)
 

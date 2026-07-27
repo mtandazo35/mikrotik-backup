@@ -33,7 +33,10 @@ ssh:
   # Usar clave privada o password. La clave es preferible: no viaja el secreto
   # y se revoca por equipo.
   password: ""
-  clave_privada: /root/mkbackup/.ssh/id_mkbackup
+  # Ruta a una clave privada, si prefieres eso a una contrasena. Vacio =
+  # ninguna. NO pongas aqui una ruta que todavia no exista: la configuracion
+  # no cargaria.
+  clave_privada: ""
   puerto_defecto: 22
   timeout: 60
   # aceptar: confia en la host key la primera vez (comodo en despliegue inicial)
