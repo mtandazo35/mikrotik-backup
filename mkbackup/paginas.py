@@ -239,7 +239,7 @@ ESTILO = """
                  transition: width .4s ease; }
 
   /* --- Cifras --- */
-  .cifras { display: grid; gap: .75rem; margin-bottom: 1rem;
+  .cifras { display: grid; gap: .75rem;
             grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .cifra { background: var(--panel); border: 1px solid var(--borde);
            border-radius: var(--radio); padding: .85rem 1.05rem;
@@ -249,8 +249,6 @@ ESTILO = """
      alinear columnas. */
   .cifra b { display: block; font-size: 1.65rem; font-weight: 650;
              letter-spacing: -.025em; line-height: 1.15; }
-  .cifra.malo b { color: var(--fallo); }
-  .cifra.bien b { color: var(--ok); }
   .cifra span { color: var(--suave); font-size: .74rem; text-transform: uppercase;
                 letter-spacing: .05em; display: block; margin-top: .15rem; }
 
@@ -269,27 +267,50 @@ ESTILO = """
   .filtros .casilla { height: var(--alto-control); margin: 0; white-space: nowrap; }
 
   /* --- Graficas --- */
-  .tartas { display: grid; gap: 1rem; margin-bottom: 1rem;
-            grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
-  .grafica { display: flex; gap: 1.3rem; align-items: center; flex-wrap: wrap; }
-  .grafica svg { width: 172px; height: 172px; flex: none; }
-  /* El hueco entre sectores se hace con el color del fondo, no con un borde:
-     un borde alrededor de cada sector engorda la tarta y ensucia los colores. */
-  .grafica svg path, .grafica svg circle { stroke: var(--panel); stroke-width: 2; }
-  .grafica svg path { transition: opacity .12s ease; }
-  .grafica svg path:hover { opacity: .8; }
-  .centro-cifra { font-size: 1.5rem; font-weight: 650; fill: var(--texto);
-                  letter-spacing: -.02em; }
-  .centro-texto { font-size: .6rem; fill: var(--suave); letter-spacing: .06em; }
-  .leyenda { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 165px;
-             font-size: .87rem; }
+  /* El bloque de arriba: la cobertura manda y ocupa el ancho, y a su lado van
+     los datos de contexto en columna. Con 760px o menos se apilan. */
+  .cabecera-estado { display: grid; gap: 1rem; margin-bottom: 1rem;
+                     grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+                     align-items: start; }
+  .hero { display: flex; flex-direction: column; gap: .1rem; }
+  /* LA cifra de la pagina, y solo hay una. Sin tabular-nums: a este tamano los
+     digitos de ancho fijo dejan huecos que se ven. Misma familia que el resto,
+     nada de una tipografia de titulares, que se leeria como adorno. */
+  .hero-cifra { font-size: 3.1rem; font-weight: 650; letter-spacing: -.03em;
+                line-height: 1.05; margin: .35rem 0 0; }
+  .hero-detalle { color: var(--suave); margin: .1rem 0 0; font-size: .93rem; }
+  /* El aviso de fallos: icono + texto, nunca el color a solas. Aparece solo
+     cuando hay algo que avisar (ver el JS). */
+  .hero-alarma { display: flex; align-items: center; gap: .45rem;
+                 margin: .7rem 0 0; font-size: .89rem; font-weight: 600;
+                 color: var(--fallo); }
+  .hero-alarma::before { content: "!"; flex: none; width: 1.15rem;
+                         height: 1.15rem; border-radius: 50%; font-size: .78rem;
+                         display: grid; place-items: center; color: #fff;
+                         background: var(--v-fallo); }
+  .hero-alarma[hidden] { display: none; }
+  .hero .grafica { margin-top: 1rem; }
+
+  .grafica { display: flex; flex-direction: column; gap: .85rem; }
+  /* La barra se estira a lo ancho de su caja: el viewBox mide 100 de ancho,
+     asi que las coordenadas son porcentajes tal cual. */
+  .barra { width: 100%; height: 16px; display: block; overflow: visible; }
+  .barra rect { transition: opacity .12s ease; }
+  .barra rect:hover { opacity: .82; }
+  /* La leyenda en columnas: con cuatro entradas cortas, una lista vertical
+     desperdicia el ancho y aleja el numero de su color. */
+  .leyenda { list-style: none; margin: 0; padding: 0; font-size: .87rem;
+             display: grid; gap: .15rem 1.4rem;
+             grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
   .leyenda li { display: flex; align-items: center; gap: .55rem; padding: .3rem 0;
-                border-bottom: 1px solid var(--borde); }
-  .leyenda li:last-child { border-bottom: 0; }
+                border-bottom: 1px solid var(--borde); min-width: 0; }
   .leyenda .marca { width: 9px; height: 9px; border-radius: 3px; flex: none; }
   .leyenda .nom { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .leyenda .val { margin-left: auto; flex: none; color: var(--suave);
+  .leyenda .val { margin-left: auto; flex: none;
                   font-variant-numeric: tabular-nums; }
+  /* El porcentaje acompana a la cuenta, mas apagado: el numero de equipos es
+     el dato, el porcentaje es la referencia. */
+  .leyenda .val i { color: var(--suave); font-style: normal; margin-left: .45rem; }
   .sin-datos { color: var(--suave); padding: .5rem 0; }
   .casillas { display: grid; gap: .3rem;
               grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
@@ -502,7 +523,8 @@ ESTILO = """
      donde caben dos columnas de formulario, y 560 es un telefono en vertical. */
 
   @media (max-width: 1024px) {
-    .tartas { grid-template-columns: 1fr; }
+    .cabecera-estado { grid-template-columns: 1fr; }
+    .cifras { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   }
 
   @media (max-width: 760px) {
@@ -787,83 +809,100 @@ function leerPaleta() {
   CLAVES.forEach(k => PAL[k] = s.getPropertyValue("--" + k).trim());
 }
 
-// Luminancia relativa (WCAG), para decidir si el porcentaje dentro de un
-// sector se escribe en negro o en blanco. Sin esto, un 62% blanco sobre el
-// amarillo del tema claro es ilegible.
-function luz(hex) {
-  const c = hex.replace("#", "");
-  if (c.length < 6) return 1;
-  const v = [0, 2, 4].map(i => {
-    const x = parseInt(c.substr(i, 2), 16) / 255;
-    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-}
+// --- Barra apilada ----------------------------------------------------------
+// Sustituye a las dos tartas que habia, y no por gusto:
+//
+//   - "Resultado del ultimo respaldo" era, con la flota sana, un anillo de UN
+//     solo sector, y con algun fallo, una tarta de dos. Una parte contra un
+//     total se lee en una barra; en un circulo de dos trozos hay que comparar
+//     angulos para distinguir un 3% de un 8%, que es justo el numero que
+//     importa cuando algo va mal.
+//   - "Equipos por cliente" reparte entre nombres largos ("Andinanet
+//     Telecomunicaciones"). En un circulo no caben al lado de su sector y hay
+//     que ir a la leyenda a emparejar color con nombre.
+//
+// Y una barra se comporta igual con 1 equipo que con 300, que es el rango real
+// de este panel.
+//
+// El viewBox mide 100 de ancho para que los porcentajes sean las coordenadas
+// tal cual; el SVG lleva preserveAspectRatio="none" y se estira a su caja sin
+// deformar nada, porque aqui dentro no hay ni circulos ni texto.
+const ALTO_BARRA = 16;
+// Separacion entre trozos, en unidades del viewBox (o sea, en % del ancho). Va
+// del color de la superficie y no es un borde: un borde alrededor de cada
+// trozo engorda los pequenos y falsea la comparacion.
+const HUECO_BARRA = 0.8;
+const REDONDEO = 3;
+// Lo mas estrecho que se pinta un trozo, en % del ancho: por debajo de esto no
+// se ve, y un estado que existe tiene que verse.
+const MINIMO_TROZO = 0.9;
 
-function punto(r, frac) {
-  const a = frac * Math.PI * 2 - Math.PI / 2;   // 0 = las 12 en punto
-  return [(85 + r * Math.cos(a)).toFixed(2), (85 + r * Math.sin(a)).toFixed(2)];
-}
-
-const RADIO = 76, HUECO = 47;
-
-function tarta(idSvg, idLeyenda, series, etiquetaCentro) {
+function barra(idSvg, idLeyenda, series, vacio) {
   const svg = document.getElementById(idSvg);
   const leyenda = document.getElementById(idLeyenda);
   const total = series.reduce((s, x) => s + x.valor, 0);
 
   if (!total) {
-    svg.innerHTML = `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}"
-      fill="none" stroke="var(--barra)" stroke-width="${RADIO - HUECO}"/>`;
-    leyenda.innerHTML = '<li class="sin-datos">Sin datos todavia.</li>';
+    svg.innerHTML = `<rect width="100" height="${ALTO_BARRA}" rx="${REDONDEO}"
+      fill="var(--barra)"/>`;
+    leyenda.innerHTML = `<li class="sin-datos">${escapar(vacio)}</li>`;
     return;
   }
 
   const vivas = series.filter(s => s.valor > 0);
-  let trozos = "", filas = "", acumulado = 0;
+  const recorte = "rec-" + idSvg;
 
-  for (const s of vivas) {
-    const frac = s.valor / total;
-    const pct = Math.round(frac * 100);
-    const f0 = acumulado, f1 = acumulado + frac;
-    acumulado = f1;
+  // El reparto del ancho se calcula ENTERO antes de dibujar nada, y no trozo a
+  // trozo mientras se avanza. Haciendolo sobre la marcha, el suelo de anchura
+  // empujaba a los de despues y el ultimo se salia de la barra: con 300
+  // equipos y 1 fallo la suma daba 100.27, el recorte se comia el sobrante, y
+  // el trozo del fallo acababa MAS estrecho que el minimo que el suelo queria
+  // garantizar. O sea que el apano para que se viera hacia justo lo contrario.
+  const huecos = (vivas.length - 1) * HUECO_BARRA;
+  const util = 100 - huecos;
+  let anchos = vivas.map(s => (s.valor / total) * util);
 
-    if (vivas.length === 1) {
-      // Un solo sector: un arco de 360 grados no se puede dibujar (inicio y
-      // fin caen en el mismo punto y el trazo sale vacio). Se pinta el anillo
-      // como un circulo con borde grueso.
-      trozos += `<circle cx="85" cy="85" r="${(RADIO + HUECO) / 2}" fill="none"
-        stroke="${s.color}" stroke-width="${RADIO - HUECO}"><title>${escapar(s.etq)}:
-        ${s.valor} (100%)</title></circle>`;
-    } else {
-      const grande = frac > 0.5 ? 1 : 0;
-      const [xa, ya] = punto(RADIO, f0), [xb, yb] = punto(RADIO, f1);
-      const [xc, yc] = punto(HUECO, f1), [xd, yd] = punto(HUECO, f0);
-      trozos += `<path d="M ${xa} ${ya} A ${RADIO} ${RADIO} 0 ${grande} 1 ${xb} ${yb}
-        L ${xc} ${yc} A ${HUECO} ${HUECO} 0 ${grande} 0 ${xd} ${yd} Z"
-        fill="${s.color}"><title>${escapar(s.etq)}: ${s.valor} (${pct}%)</title></path>`;
-    }
-
-    // El porcentaje solo se escribe dentro si el sector da de si; en uno
-    // estrecho el texto se saldria o se recortaria, y para eso esta la
-    // leyenda, que lleva el numero exacto de todas formas.
-    if (frac >= 0.09) {
-      const [xt, yt] = punto((RADIO + HUECO) / 2, f0 + frac / 2);
-      const tinta = luz(s.color) > 0.45 ? "#0b0b0b" : "#ffffff";
-      trozos += `<text x="${xt}" y="${yt}" fill="${tinta}" font-size="12"
-        font-weight="600" text-anchor="middle" dominant-baseline="central"
-        >${pct}%</text>`;
-    }
-
-    filas += `<li><span class="marca" style="background:${s.color}"></span>
-      <span class="nom" title="${escapar(s.etq)}">${escapar(s.etq)}</span>
-      <span class="val">${s.valor} &middot; ${pct}%</span></li>`;
+  // Suelo: un equipo entre 300 es un 0.33% y sin esto no se pinta ni un pixel.
+  // Falsea un poco el ancho, pero un fallo que no se ve es peor que uno que se
+  // ve algo mas grande de lo que es; el numero exacto va en la leyenda.
+  const sube = anchos.map(a => Math.max(MINIMO_TROZO, a));
+  const sobra = sube.reduce((t, a) => t + a, 0) - util;
+  if (sobra > 0) {
+    // Lo que se le regalo a los pequenos se le quita a los que van sobrados,
+    // en proporcion a lo que ocupan. Asi la suma vuelve a ser exacta y el
+    // recorte no tiene que tapar nada.
+    const holgura = sube.reduce((t, a, i) => t + (a > MINIMO_TROZO ? a - MINIMO_TROZO : 0), 0);
+    anchos = sube.map(a => a > MINIMO_TROZO && holgura > 0
+      ? a - sobra * ((a - MINIMO_TROZO) / holgura)
+      : a);
+  } else {
+    anchos = sube;
   }
 
-  svg.innerHTML = trozos + `
-    <text x="85" y="80" class="centro-cifra" text-anchor="middle">${total}</text>
-    <text x="85" y="97" class="centro-texto" text-anchor="middle"
-      >${escapar(etiquetaCentro)}</text>`;
+  let trozos = "", filas = "", x = 0;
+  vivas.forEach((s, i) => {
+    const pct = (s.valor / total) * 100;
+    const ancho = anchos[i];
+
+    trozos += `<rect x="${x.toFixed(3)}" y="0" width="${ancho.toFixed(3)}"` +
+      ` height="${ALTO_BARRA}" fill="${s.color}">` +
+      `<title>${escapar(s.etq)}: ${s.valor} (${Math.round(pct)}%)</title></rect>`;
+    x += ancho + HUECO_BARRA;
+
+    filas += `<li><span class="marca" style="background:${s.color}"></span>` +
+      `<span class="nom" title="${escapar(s.etq)}">${escapar(s.etq)}</span>` +
+      `<span class="val">${s.valor}<i>${Math.round(pct)}%</i></span></li>`;
+  });
+
+  // Las esquinas se redondean recortando la barra ENTERA, no trozo a trozo:
+  // asi los extremos salen redondos y las juntas de dentro quedan a escuadra.
+  // Redondear cada trozo dejaria la barra con aspecto de collar de cuentas y
+  // encogeria visualmente los pequenos.
+  svg.innerHTML =
+    `<defs><clipPath id="${recorte}"><rect width="100" height="${ALTO_BARRA}"` +
+    ` rx="${REDONDEO}"/></clipPath></defs>` +
+    `<rect width="100" height="${ALTO_BARRA}" rx="${REDONDEO}" fill="var(--barra)"/>` +
+    `<g clip-path="url(#${recorte})">${trozos}</g>`;
   leyenda.innerHTML = filas;
 }
 
@@ -958,23 +997,48 @@ function pintar(d) {
   const sinRespaldar = equipos.length - bien - conCambio - fallidos;
   const clientes = [...new Set(equipos.map(e => e.empresa))];
 
-  // El color acompana al numero, no lo sustituye: la etiqueta sigue diciendo
-  // "Fallidos". Un cero no se pinta de rojo, que seria alarmar por costumbre.
-  document.getElementById("cifras").innerHTML = [
-    ["Clientes", clientes.length, ""],
-    ["Equipos", equipos.length, ""],
-    ["Respaldados", bien + conCambio, (bien + conCambio) && !fallidos ? "bien" : ""],
-    ["Fallidos", fallidos, fallidos ? "malo" : ""],
-    ["Proximo ciclo", proximo, ""],
-  ].map(([t, v, clase]) => `<div class="cifra ${clase}"><b>${escapar(v)}</b>` +
-        `<span>${t}</span></div>`).join("");
+  // LA cifra de la pagina: que parte de la flota esta respaldada. Antes esto
+  // habia que deducirlo comparando dos recuadros ("Equipos 300" y "Respaldados
+  // 287"), y con un solo equipo los dos ponian "1", que no dice nada.
+  //
+  // Va en porcentaje y no en cuenta porque es lo que se lee de un vistazo y no
+  // depende del tamano de la flota: un 96% se entiende igual con 25 equipos que
+  // con 300. La cuenta exacta va debajo, que es el dato para ponerse a trabajar.
+  const respaldados = bien + conCambio;
+  const pct = equipos.length ? Math.round((respaldados / equipos.length) * 100) : 0;
+  document.getElementById("hero-cifra").textContent = equipos.length ? pct + "%" : "-";
+  document.getElementById("hero-detalle").textContent = equipos.length
+    ? `${respaldados} de ${equipos.length} equipos respaldados`
+    : "Todavia no hay equipos en el inventario";
 
-  tarta("t-estado", "l-estado", [
+  // El aviso de fallos aparece SOLO si hay alguno. Un "0 fallidos" permanente
+  // ensena a no mirar ese sitio, y entonces el dia que ponga 3 tampoco se mira.
+  // Lleva icono y texto: el color no puede ser lo unico que avise, porque no
+  // todo el mundo lo distingue.
+  const alarma = document.getElementById("hero-alarma");
+  alarma.hidden = !fallidos;
+  if (fallidos) {
+    alarma.textContent = fallidos === 1
+      ? "1 equipo no se pudo respaldar"
+      : `${fallidos} equipos no se pudieron respaldar`;
+  }
+
+  barra("b-estado", "l-estado", [
     { etq: "Sin cambios", valor: bien, color: PAL["v-bien"] },
     { etq: "Con cambios", valor: conCambio, color: PAL["v-cambio"] },
     { etq: "Fallidos", valor: fallidos, color: PAL["v-fallo"] },
     { etq: "Sin respaldar", valor: sinRespaldar, color: PAL["v-nada"] },
-  ], "equipos");
+  ], "Todavia no se ha respaldado nada.");
+
+  // Los recuadros se quedan solo con el CONTEXTO: cuanta flota hay y cuando
+  // toca la proxima vuelta. El resultado del respaldo ya lo cuenta el bloque de
+  // arriba, y tenerlo en los dos sitios obligaba a mirar dos veces lo mismo.
+  document.getElementById("cifras").innerHTML = [
+    ["Clientes", clientes.length],
+    ["Equipos", equipos.length],
+    ["Proximo ciclo", proximo],
+  ].map(([t, v]) => `<div class="cifra"><b>${escapar(v)}</b>` +
+        `<span>${t}</span></div>`).join("");
 
   const porCliente = {};
   equipos.forEach(e => { porCliente[e.empresa] = (porCliente[e.empresa] || 0) + 1; });
@@ -1000,7 +1064,7 @@ function pintar(d) {
       color: PAL.v5,
     });
   }
-  tarta("t-clientes", "l-clientes", serieClientes, "equipos");
+  barra("b-clientes", "l-clientes", serieClientes, "Sin equipos todavia.");
 
   const orden = { fallo: 0, en_curso: 1, cambio: 2, pendiente: 3, sin_cambios: 4 };
   // Los mismos equipos que ya se contaron arriba, ordenados para la tabla:
@@ -1074,24 +1138,29 @@ def panel(sesion, refresco: int, zona: str = "America/Guayaquil") -> str:
     cuerpo = """
   <div id="aviso-ciclo" hidden></div>
 
-  <div class="cifras" id="cifras"></div>
-
-  <div class="tartas">
-    <div class="tarjeta">
-      <h2>Resultado del ultimo respaldo</h2>
+  <div class="cabecera-estado">
+    <div class="tarjeta hero">
+      <h2>Cobertura de la flota</h2>
+      <p class="hero-cifra" id="hero-cifra">-</p>
+      <p class="hero-detalle" id="hero-detalle"></p>
+      <p class="hero-alarma" id="hero-alarma" hidden></p>
       <div class="grafica">
-        <svg id="t-estado" viewBox="0 0 170 170" role="img"
-             aria-label="Resultado del ultimo respaldo por equipo"></svg>
+        <svg id="b-estado" class="barra" viewBox="0 0 100 16"
+             preserveAspectRatio="none" role="img"
+             aria-label="Reparto de los equipos por resultado del ultimo respaldo"></svg>
         <ul class="leyenda" id="l-estado"></ul>
       </div>
     </div>
-    <div class="tarjeta">
-      <h2>Equipos por cliente</h2>
-      <div class="grafica">
-        <svg id="t-clientes" viewBox="0 0 170 170" role="img"
-             aria-label="Reparto de equipos por cliente"></svg>
-        <ul class="leyenda" id="l-clientes"></ul>
-      </div>
+    <div class="cifras" id="cifras"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>Equipos por cliente</h2>
+    <div class="grafica">
+      <svg id="b-clientes" class="barra" viewBox="0 0 100 16"
+           preserveAspectRatio="none" role="img"
+           aria-label="Reparto de equipos por cliente"></svg>
+      <ul class="leyenda" id="l-clientes"></ul>
     </div>
   </div>
 

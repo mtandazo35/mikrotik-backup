@@ -24,6 +24,7 @@ Ejecutar:  python -m tests.test_paginas
 
 import html.parser
 import re
+from pathlib import Path
 
 from mkbackup import paginas as pg
 from mkbackup.config import Config
@@ -177,6 +178,41 @@ def paginas_a_revisar():
     return salida
 
 
+def ejecutar_barra() -> None:
+    """Corre tests/barra.js contra el JS que sale de panel(), con node."""
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    print()
+    if not shutil.which("node"):
+        print("[ -- ] la barra no se ejecuta: no hay node (no cuenta como fallo)")
+        return
+
+    html = pg.panel(SESION, 3, "America/Guayaquil")
+    guiones = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    if not guiones:
+        comprobar("el panel trae su JavaScript", False)
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        js = Path(tmp) / "panel.js"
+        js.write_text(guiones[0], encoding="utf-8")
+        r = subprocess.run(
+            ["node", str(Path(__file__).parent / "barra.js"), str(js)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    for linea in (r.stdout or "").splitlines():
+        if linea.startswith("[OK  ]") or linea.startswith("[FALLA]"):
+            print(linea)
+        elif linea.startswith("---"):
+            print(linea)
+    if r.returncode != 0:
+        FALLOS.append("la geometria de la barra del panel esta mal")
+        print((r.stderr or "").strip()[:400])
+
+
 def main() -> None:
     revisadas = paginas_a_revisar()
     comprobar(f"se pintan las paginas del panel ({len(revisadas)})",
@@ -250,6 +286,18 @@ def main() -> None:
               pintada.count("&lt;script&gt;") >= 2)
     comprobar("esc() tapa las comillas, no solo los angulos",
               pg.esc('a"b\'c<d>e&f') == "a&quot;b&#x27;c&lt;d&gt;e&amp;f")
+
+    # --- 8. La barra del panel, EJECUTADA -----------------------------------
+    # Lo de arriba mira el HTML; la barra la dibuja el JavaScript en el
+    # navegador, y ahi "compila" no basta: un reparto de anchos puede compilar
+    # perfectamente y salirse de su caja. Paso de verdad -con 300 equipos y 1
+    # fallo la suma daba 100.27 y el recorte se comia el sobrante, dejando el
+    # trozo del fallo MAS estrecho que el minimo que queria garantizarse- y no
+    # habia forma de verlo sin ejecutarlo.
+    #
+    # Necesita node. Si no esta, se dice y no se cuenta como fallo: no se le va
+    # a exigir node a quien solo quiere respaldar routers.
+    ejecutar_barra()
 
     print()
     if FALLOS:
