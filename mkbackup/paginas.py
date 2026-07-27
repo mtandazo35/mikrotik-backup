@@ -355,6 +355,17 @@ ESTILO = """
   .rejilla { display: grid; gap: 0 1.1rem;
              grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 
+  /* Un campo con un boton pegado a la derecha. El input se lleva el sitio que
+     sobre (1fr) y el boton solo el suyo (auto), y en pantalla estrecha se
+     apilan solos: sin el minmax, el input se comprimia hasta no dejar leer lo
+     que hay escrito, que es justo lo que este boton acaba de rellenar. */
+  .con-boton { display: grid; gap: .5rem; align-items: start;
+               grid-template-columns: minmax(0, 1fr) auto; }
+  .con-boton button { white-space: nowrap; }
+  @media (max-width: 460px) {
+    .con-boton { grid-template-columns: 1fr; }
+  }
+
   button, .boton {
     font: inherit; font-size: .89rem; font-weight: 600; cursor: pointer;
     height: var(--alto-control); padding: 0 1.05rem;
@@ -1305,9 +1316,11 @@ def formulario_equipo(datos: dict, errores, alta: bool, original: str = "",
         if not alta else ""
     )
     pista_nombre = (
-        "Si lo dejas vacio, se le pregunta al propio router su /system identity "
-        "al guardarlo. Si no responde, se guarda con la IP y se renombra solo "
-        "en el primer respaldo que salga bien."
+        "Es el /system identity del propio router: con el boton de al lado se "
+        "le pregunta ahora, con la IP, el puerto y las credenciales que haya "
+        "en este formulario. Si lo dejas vacio se le pregunta al guardar, y si "
+        "no responde se guarda con la IP y se renombra solo en el primer "
+        "respaldo que salga bien."
     )
     # La clave nunca se devuelve al navegador, ni siquiera para rellenar el
     # campo al editar: se manda vacia y vacia significa "deja la que ya tiene".
@@ -1325,8 +1338,18 @@ def formulario_equipo(datos: dict, errores, alta: bool, original: str = "",
       {oculto}
       <div class="campo">
         <label for="nombre">Nombre del router</label>
-        <input id="nombre" type="text" name="nombre" value="{esc(datos.get('nombre'))}"
-               autocomplete="off" autofocus>
+        <div class="con-boton">
+          <input id="nombre" type="text" name="nombre" value="{esc(datos.get('nombre'))}"
+                 autocomplete="off" autofocus>
+          <!-- Boton de envio con name/value propios: el mismo formulario, el
+               mismo destino, y el servidor distingue por "accion". Asi no hace
+               falta JavaScript ni otra ruta, y lo que ya se tecleo en el resto
+               de campos viaja y vuelve intacto. -->
+          <button type="submit" name="accion" value="identidad" class="secundario"
+                  title="Abre una sesion SSH al equipo y lee su /system identity">
+            Preguntar al router
+          </button>
+        </div>
         <div class="pista">{pista_nombre}</div>
       </div>
       <div class="campo">

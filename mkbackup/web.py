@@ -1416,11 +1416,80 @@ class Manejador(BaseHTTPRequestHandler):
 
     # --- Alta, edicion y baja ----------------------------------------------
 
+    def _preguntar_identidad(self, campos: dict, alta: bool) -> bool:
+        """Le pregunta el nombre al router y repinta el formulario. Sin guardar.
+
+        Devuelve True si atendio la peticion (y ya escribio la respuesta).
+
+        Existe porque preguntar la identidad solo pasaba con el nombre VACIO, y
+        en la pantalla de editar el campo viene relleno: un equipo al que le
+        cambiaron el nombre en el router se quedaba para siempre con el que se
+        tecleo el primer dia. Que sea un boton y no algo automatico al guardar
+        es deliberado: cambiar el nombre mueve el archivo dentro del repo, y eso
+        no puede pasar de sorpresa por abrir el formulario y darle a guardar.
+
+        No valida ni guarda nada: solo rellena el campo y devuelve el formulario
+        tal como estaba, para que quien lo mira vea lo que va a guardar ANTES de
+        guardarlo.
+        """
+        if campos.get("accion") != "identidad":
+            return False
+
+        # Se construye un Equipo solo para poder preguntar: lleva la IP, el
+        # puerto y las credenciales que hay AHORA MISMO en el formulario, que es
+        # lo que hace util al boton (se pueden corregir y volver a probar sin
+        # guardar nada). El nombre da igual, no viaja al equipo.
+        clave = campos.get("clave", "")
+        if not clave and campos.get("original"):
+            equipos, _ = self._inventario_tolerante()
+            anterior = next(
+                (e for e in equipos if e.nombre == campos["original"]), None
+            )
+            if anterior is not None:
+                clave = getattr(anterior, "clave", "")
+
+        sonda, errores = validar_equipo(
+            nombre=self._nombre_provisional(campos.get("ip", "").strip()),
+            empresa=campos.get("empresa", ""),
+            ip=campos.get("ip", ""),
+            puerto=campos.get("puerto", ""),
+            grupo=campos.get("grupo", ""),
+            usuario=campos.get("usuario", ""),
+            clave=clave,
+        )
+        if errores:
+            # Sin una IP y un puerto validos no hay a quien preguntar. Se dice
+            # eso y no "no respondio", que mandaria a revisar el router.
+            self._html(paginas.formulario_equipo(
+                campos, errores, alta, original=campos.get("original", ""),
+                sesion=self._para_pintar(self.usuario)))
+            return True
+
+        real = self._identidad(sonda)
+        if real:
+            campos = dict(campos, nombre=real)
+            aviso = []
+            log.info("Identidad de %s: '%s'", sonda.ip, real)
+        else:
+            aviso = [
+                f"El equipo de {sonda.ip}:{sonda.puerto} no dijo como se llama. "
+                "Puede estar apagado, con otras credenciales, o con un usuario "
+                "sin permiso para leer /system identity. El nombre se deja como "
+                "estaba."
+            ]
+
+        self._html(paginas.formulario_equipo(
+            campos, aviso, alta, original=campos.get("original", ""),
+            sesion=self._para_pintar(self.usuario)))
+        return True
+
     def _alta(self) -> None:
         if not self._editable("equipos.crear"):
             return
         campos = self._campos()
         if campos is None:
+            return
+        if self._preguntar_identidad(campos, alta=True):
             return
 
         with self.ctx.candado:
@@ -1459,6 +1528,9 @@ class Manejador(BaseHTTPRequestHandler):
             return
         campos = self._campos()
         if campos is None:
+            return
+
+        if self._preguntar_identidad(campos, alta=False):
             return
 
         original = campos.get("original", "")
