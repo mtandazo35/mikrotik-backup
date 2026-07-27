@@ -21,6 +21,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from mkbackup import hechos as hh
@@ -85,6 +86,14 @@ def main() -> None:
 
         # 4. EL CASO CENTRAL: un dato vacio no pisa uno bueno.
         #    El ciclo siguiente falla y no se pudo leer ni modelo ni version.
+        #
+        #    La espera NO es un adorno ni un parche: el reloj de Windows avanza
+        #    a saltos de unos 15 ms, asi que dos anotaciones seguidas reciben
+        #    LA MISMA marca de tiempo y las comprobaciones de "avanzo" de mas
+        #    abajo fallarian sin que el codigo tenga nada que ver. Si alguien
+        #    la quita porque parece que sobra, la prueba vuelve a fallar una de
+        #    cada tres veces.
+        time.sleep(0.03)
         h.anotar("BTS-Norte-01", modelo="", version="", resultado="fallo", ok=False)
         tras_fallo = h.de("BTS-Norte-01")
         comprobar("tras un fallo se conserva el modelo que ya se sabia",
@@ -103,6 +112,7 @@ def main() -> None:
         comprobar("pero SI movio el ultimo intento",
                   tras_fallo["ultimo_intento"] > datos["ultimo_intento"])
 
+        time.sleep(0.03)   # ver el comentario del reloj, mas arriba
         h.anotar("BTS-Norte-01", modelo="RB4011iGS+", version="7.15",
                  resultado="sin_cambios", ok=True)
         bueno = h.de("BTS-Norte-01")

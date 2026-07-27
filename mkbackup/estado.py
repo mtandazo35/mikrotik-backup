@@ -38,6 +38,15 @@ LATIDO_SEGUNDOS = 5
 LATIDO_MAXIMO = 40
 # Ejecuciones anteriores que se conservan para ver la tendencia.
 HISTORIAL_MAXIMO = 20
+# Cuanto se insiste en leer el estado cuando el archivo esta bloqueado. Solo
+# se gasta si hay colision de verdad: en el caso normal se acierta a la
+# primera y no se espera nada. Dos segundos es mucho mas de lo que dura un
+# os.replace y sigue siendo menos de lo que tarda el panel en refrescar.
+PLAZO_LECTURA = 2.0
+# Y cuanto se insiste cuando el archivo directamente no esta. Corto: casi
+# siempre significa que no ha corrido nunca, y el panel pregunta cada pocos
+# segundos.
+PLAZO_AUSENTE = 0.2
 
 # Estados por equipo.
 PENDIENTE = "pendiente"
@@ -317,26 +326,46 @@ def leer(ruta: str | Path, intentos: int = 12) -> dict | None:
     verdad: en el caso normal se acierta a la primera y no se duerme nada.
     """
     ruta = Path(ruta)
+    limite = time.monotonic() + PLAZO_LECTURA
+    # Plazo corto y aparte para el archivo ausente: ver el comentario de
+    # FileNotFoundError mas abajo.
+    breve = time.monotonic() + PLAZO_AUSENTE
     espera = 0.005
-    for intento in range(intentos):
+    while True:
         try:
             datos = json.loads(ruta.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return None  # todavia no ha corrido nunca: reintentar no ayuda
+            # Casi siempre significa "todavia no ha corrido nunca", y ahi
+            # reintentar dos segundos seria absurdo: el panel pregunta cada
+            # pocos segundos y se quedaria colgado en cada vuelta.
+            #
+            # Pero en Windows hay un instante, durante os.replace, en el que el
+            # archivo NO esta: un lector que caiga justo ahi recibe esto aunque
+            # el archivo exista de sobra. Por eso se insiste un poco -unas
+            # decimas- y solo entonces se da por bueno que no hay estado. Es lo
+            # que quedaba de las "lecturas ciegas" que se colaban de vez en
+            # cuando con el respaldo escribiendo a destajo.
+            if time.monotonic() >= breve:
+                return None
+            time.sleep(0.005)
         except OSError:
-            if intento == intentos - 1:
+            # Se reintenta contra un PLAZO y no contra un numero de intentos.
+            # Con un numero fijo, la resistencia depende de cuanto se tarde en
+            # cada vuelta: en una maquina cargada, donde el respaldo escribe
+            # mas seguido, es justo cuando mas colisiones hay y cuando antes
+            # se agotan los intentos. El plazo se adapta solo.
+            if time.monotonic() >= limite:
                 return None
             # Creciente y con tope: si el respaldo esta escribiendo sin parar,
             # esperar siempre lo mismo puede caer una y otra vez en la misma
-            # ventana. El tope evita que un pico de bloqueos deje al panel
-            # esperando mas de lo que tarda su propio refresco.
+            # ventana. El tope evita quedarse esperando mas de lo que tarda el
+            # propio refresco del panel.
             time.sleep(espera)
             espera = min(espera * 1.7, 0.05)
         except ValueError:
             return None  # corrupto de verdad
         else:
             return datos if isinstance(datos, dict) else None
-    return None
 
 
 def situacion(datos: dict | None) -> str:
