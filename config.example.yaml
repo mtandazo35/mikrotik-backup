@@ -86,9 +86,47 @@ almacen:
   # Modelo, version de RouterOS y fecha del ultimo respaldo de cada equipo. Lo
   # escribe el respaldo y lo lee el panel para las columnas de la tabla.
   hechos: /root/mkbackup/equipos.json
-  # Remoto opcional. Si los respaldos llevan secretos (mostrar_secretos: true),
-  # usar un remoto cifrado - ver la seccion de replicacion del README.
+  # --- A donde se suben los respaldos, ademas de guardarlos aqui -------------
+  # LO NORMAL ES CONFIGURAR ESTO DESDE EL PANEL (Ajustes), no aqui: las cinco
+  # claves remoto* estan en la lista blanca que el panel puede escribir, porque
+  # un token caduca y se rota, y exigir entrar por SSH al servidor cada vez
+  # llevaba a que la copia de fuera se quedara meses fallando. Lo que se guarde
+  # desde el panel MANDA sobre lo que se ponga aqui.
+  #
+  # OJO, y esto es lo importante: si export.mostrar_secretos esta en true (que
+  # es el valor por defecto), los respaldos llevan dentro los passwords PPPoE,
+  # las PSK de wireless y los secrets de VPN de tus clientes en texto plano.
+  # Ese repositorio TIENE que ser PRIVADO. Si no puede serlo, usa un remoto
+  # cifrado (gcrypt::, ver el README) - eso si hay que ponerlo aqui, porque el
+  # panel solo admite https://, ssh:// y git@.
+  #
+  # Vacio = a ningun sitio, que es lo que hay recien instalado: mandar las
+  # configuraciones fuera de la maquina es una decision, no un valor por
+  # defecto. Nada de http:// sin cifrar: por ahi viajarian las configuraciones
+  # y el token.
   remoto: ""
+  # La rama del remoto. Vacio = la misma que se use aqui.
+  remoto_rama: ""
+  # Credencial para un repositorio privado por HTTPS. El usuario casi nunca
+  # importa (GitHub y GitLab miran el token), pero se pide igual porque hay
+  # servidores que si; vacio = x-access-token. Por SSH se dejan los dos vacios:
+  # ahi manda la llave del servidor.
+  #
+  # El token NO se mete dentro de la URL, que es como se suele hacer: la URL se
+  # guarda en .git/config, viaja en cada copia del repositorio y sale en el
+  # mensaje de cualquier error de red. Va como cabecera en la linea de comandos
+  # de esa orden de git y muere con ella.
+  #
+  # Si lo pones desde el panel -lo normal- acaba en almacen.ajustes
+  # (ajustes.json, de root y 0600) y NO en este archivo. Escribirlo aqui es
+  # dejar un secreto mas en un sitio mas.
+  remoto_usuario: ""
+  remoto_token: ""
+  # Cada cuantos ciclos CON CAMBIOS se sube. 1 = en cuanto hay algo nuevo.
+  # Subirlo tiene sentido con una flota grande y un remoto lento: lo que se
+  # sube es el historico entero, asi que agrupar varios ciclos en un push no
+  # pierde nada. 0 apaga la subida sin tener que borrar la direccion.
+  remoto_cada: 1
   autor: mkbackup
   email: mkbackup@localhost
 

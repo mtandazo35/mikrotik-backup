@@ -768,8 +768,8 @@ Se guardan los accesos (`login_ok`, `login_fallido`, `login_bloqueado`,
 `salir`, `desbloqueo`, `clave_propia`), los intentos rechazados (`sin_permiso`,
 `fuera_de_alcance`) y los cambios: cuentas (`usuario_alta`, `usuario_cambio`,
 `usuario_baja`), roles (`rol_cambio`, `rol_baja`), inventario (`equipo_alta`,
-`equipo_cambio`, `equipo_baja`, `importacion`) y configuración (`ajustes`,
-`acceso_ssh`).
+`equipo_cambio`, `equipo_baja`, `datos_borrados`, `importacion`) y configuración
+(`ajustes`, `acceso_ssh`).
 
 **Nunca guarda claves**, ni hashes, ni tokens de sesión. De un cambio de
 credenciales SSH se anota que cambió y quién, no el valor. Sí se anota el nombre
@@ -844,9 +844,15 @@ router de 24 h no aparece en la mayoría de los ciclos.
 
 La pantalla de estado muestra en qué situación está la ejecución (en curso con
 barra de avance, terminada, terminada con fallos o interrumpida), el detalle
-equipo por equipo, los avisos del inventario y las últimas ejecuciones.
+equipo por equipo, los avisos del inventario y las **cinco últimas ejecuciones**.
 
-Arriba hay una fila de totales — **Clientes, Equipos, Respaldados, Fallidos,
+Fueron veinte, luego diez y ahora cinco (`HISTORIAL_MAXIMO` en `estado.py`).
+Diez seguían siendo diez filas casi idénticas —"1/1, 0 cambios, 18 s"— una
+debajo de otra, y una tabla en la que todas las filas dicen lo mismo no se lee:
+se salta entera. Para la tendencia a largo plazo están los commits de git, que
+no caducan.
+
+Arriba hay una fila de totales — **Empresas, Equipos, Respaldados, Fallidos,
 Próximo ciclo** — y debajo dos gráficas de tarta con leyenda y conteos:
 
 | Gráfica | Qué reparte |
@@ -854,10 +860,40 @@ Próximo ciclo** — y debajo dos gráficas de tarta con leyenda y conteos:
 | **Resultado del último respaldo** | Sin cambios / Con cambios / Fallidos / Sin respaldar. |
 | **Equipos por cliente** | Los cuatro clientes con más equipos, y el resto plegado en "Otros". |
 
+Los recuadros dicen **Empresas** y no "Clientes" porque *empresa* es como se
+llama ese campo en el formulario de alta, en la columna de la tabla y en el
+filtro. Con dos palabras para la misma cosa hay que adivinar qué cuenta cada
+recuadro, y "no sé qué está contando" fue exactamente lo que preguntó quien lo
+usa. Detrás de los cinco de siempre aparecen, **solo si hay algo que contar**,
+**Empresas con fallos**, **Empresas al día** y **Empresas pendientes**: un "0
+empresas con fallos" permanente enseña a no mirar ese sitio, y entonces el día
+que ponga 2 tampoco se mira.
+
 Los totales se cuentan sobre los **equipos** y no sobre los contadores del
 ciclo: con intervalos por equipo, un ciclo puede tocar solo a una parte de la
 flota, y "3 de 3" no dice nada de los otros 297. Y todo esto se recorta al
 alcance de quien mira (ver [Multitenant](#multitenant-quién-ve-qué-equipos)).
+
+#### La flota que se cuenta es la de ahora, no la del último ciclo
+
+La lista la manda el **inventario**, y encima se le pega lo que se sepa del
+último ciclo — no al revés (`_equipos_del_estado` en `web.py`). Antes se pintaba
+la foto que dejó el ciclo, y eso se veía como una cifra que no cuadra con la
+realidad, en las dos direcciones:
+
+- Dabas de baja un equipo y Estado **seguía contándolo durante horas**, hasta el
+  siguiente ciclo. Con un solo router en la flota, el panel decía "1 equipo, 1
+  respaldado" sobre uno que ya no existía.
+- Dabas de alta otro y **no aparecía hasta que le tocara turno**, así que Estado
+  decía "3 equipos" mientras en Equipos había 4.
+
+Ahora un equipo recién dado de alta sale como **pendiente**, que es exactamente
+lo que es, y uno dado de baja desaparece en el acto. La empresa y el grupo
+también se toman del inventario y no de la foto: si a un equipo le cambiaron de
+cliente esta mañana, la tarta tiene que pintarlo donde está ahora.
+
+Si el inventario no se puede leer, se cae a lo que diga el estado. Es dato
+viejo, pero es mejor que una pantalla en blanco cuando lo que falla es el CSV.
 
 Se dibujan en **SVG generado en el navegador, sin ninguna librería externa** —
 el proyecto no añade dependencias para pintar dos tartas, y un panel que corre
@@ -963,6 +999,53 @@ Las escrituras van con candado: `inventory.guardar` es atómico, pero dos altas
 simultáneas leerían la misma lista y la segunda se llevaría por delante a la
 primera. Con `ThreadingHTTPServer` eso no es hipotético — cada pestaña es un
 hilo.
+
+### Borrar los datos de un equipo
+
+Dar de baja no borra los respaldos, y ese es el comportamiento que se quiere
+casi siempre. Pero un cliente que se va puede pedir que no quede nada suyo, y
+"está borrado pero sigue en el historial" no es eso. La tarjeta **Borrar los
+datos de un equipo**, en `/ajustes`, es la única forma de sacar un respaldo del
+repositorio desde el panel.
+
+**Solo salen los equipos dados de baja**: los que tienen archivos en el
+repositorio pero ya no están en el inventario. Un equipo activo no aparece en la
+lista, así que no hay forma de borrar por descuido lo de un router que se sigue
+respaldando. La comparación es contra la **ruta** (`empresa/equipo.rsc`) y no
+contra el nombre: dos clientes pueden tener un "Router-Principal", y mirar solo
+el nombre daría por vivo el archivo del que se fue.
+
+Se ofrecen **las dos formas**, y elige quien borra:
+
+| Forma | Qué hace | Se deshace |
+|---|---|---|
+| **Quitarlo del repositorio** | `git rm` y commit. El archivo desaparece de la versión de hoy. | Sí: sus versiones anteriores siguen en git (`git checkout <commit>^ -- <ruta>`). |
+| **Borrarlo también del historial** | Reescribe el repositorio (`git filter-branch --index-filter`) para que no quede en ninguna versión, y recoge lo que sobra (`refs/original`, reflog, `gc --prune=now`). | **No.** |
+
+En los dos casos se borran también los `.backup` de ese equipo: son
+certificados y claves SSH de alguien que ya no está.
+
+Reescribir la historia **cambia el identificador de todos los commits**, así que
+un repositorio ya subido a un remoto queda divergido y el siguiente push se
+rechaza. Está dicho en pantalla, y es el precio de que el dato desaparezca de
+verdad.
+
+Tres frenos, porque esto no tiene marcha atrás:
+
+- **Hay que escribir el nombre exacto del equipo** en un campo. Sin eso no se
+  borra nada. Es lo único que separa este botón de un clic en la fila de al
+  lado, así que se compara tal cual, sin recortes ni mayúsculas.
+- **La ruta se vuelve a buscar en la lista** antes de tocar nada: que el
+  formulario la mande no significa nada, un formulario se edita.
+- **Con un ciclo en marcha se niega** (409). El programador es otro proceso
+  escribiendo en ese mismo repositorio, y purgar lo reescribe entero.
+
+Hacen falta los dos permisos, `ajustes` y `equipos.baja`, y queda en la
+auditoría como `datos_borrados` con la ruta y la forma. En **multitenant** solo
+lo ve quien lo ve todo: un equipo dado de baja ya no está en el inventario y no
+se le puede calcular el alcance, la misma regla que en `/cambios`. Adivinar la
+empresa por el nombre de su carpeta dejaría que quien acierte el slug se llevara
+por delante los respaldos del cliente de al lado.
 
 ### Nombre automático del router
 
@@ -1085,6 +1168,15 @@ la importación haya terminado.
 | `/historial?equipo=X` | Las versiones de un equipo, de la más reciente a la más antigua. |
 | `/diferencia` | El diff de una versión concreta. Requiere el permiso `diferencias`. |
 
+**"Todas las versiones" de un equipo dado de baja ya no responde 404.** Lo
+hacía, y era engañoso: dar de baja es dejar de consultarlo, no perder lo que se
+sabía de él, sus `.rsc` siguen en el repositorio a propósito, y de hecho se
+acababa de llegar desde `/cambios`, donde ese equipo sale listado. Lo único que
+ya no existe es su ficha del inventario, que es de donde sale la ruta de sus
+archivos. Ahora se vuelve a `/cambios` explicándolo — que es de donde se venía y
+donde sus versiones se siguen viendo una a una — en vez de dar un error por algo
+que no lo es.
+
 Es **solo lectura** sobre el repo: `git log` y `git show`, nunca `add` ni
 `commit`. Eso es de `store.py`, que corre en el proceso del respaldo; leer no
 toca el índice, así que no hay `index.lock` que disputar aunque el respaldo esté
@@ -1126,7 +1218,7 @@ cualquiera que entre.
 
 ### Ajustes desde el panel
 
-`/ajustes` (permiso `ajustes`) cambia tres cosas **sin reiniciar nada y sin
+`/ajustes` (permiso `ajustes`) cambia cuatro cosas **sin reiniciar nada y sin
 reescribir ninguna unidad de systemd**:
 
 1. **Cada cuánto se respalda.** El intervalo **general** del programador
@@ -1142,7 +1234,11 @@ reescribir ninguna unidad de systemd**:
    entera sin credencial. La clave **no se manda al navegador ni para rellenar
    el campo**, pero sí se dice si hay alguna puesta: un campo vacío sin más no
    distingue "no la toques" de "no hay ninguna".
-3. **El fondo de la pantalla de entrada** (ver arriba).
+3. **A dónde se suben los respaldos.** La dirección del repositorio remoto, la
+   rama, cada cuántos ciclos con cambios se sube, el usuario y el token, con un
+   botón para probar la conexión en el momento. Tiene sección propia: ver
+   [Subir los respaldos fuera del servidor](#subir-los-respaldos-fuera-del-servidor).
+4. **El fondo de la pantalla de entrada** (ver arriba).
 
 Lo que se cambia en el panel **no se escribe en el YAML**: va a
 `almacen.ajustes` (`/root/mkbackup/ajustes.json` por defecto) y **manda sobre
@@ -1152,18 +1248,35 @@ ajuste guardado desde el panel.
 **Por qué un archivo aparte y no `config.yaml`:** las dos unidades corren con
 `ProtectSystem=strict`, y `config.yaml` es un archivo que **edita una persona
 con root**. Está lleno de comentarios que un volcado automático se comería, y
-lleva las rutas del repositorio, el remoto de replicación y los parámetros del
-propio panel. Darle permiso de escritura sobre él al proceso que atiende
-peticiones HTTP sería darle la capacidad de apuntar los respaldos a otro sitio.
-Lo que el panel puede tocar es una **lista blanca de cinco claves**
-(`AJUSTES_EDITABLES` en `config.py`), y todo lo demás sigue siendo de archivo.
+lleva las rutas del repositorio y los parámetros del propio panel. Darle permiso
+de escritura sobre él al proceso que atiende peticiones HTTP sería darle la
+capacidad de apuntar los respaldos a otro sitio. Lo que el panel puede tocar es
+una **lista blanca de diez claves** (`AJUSTES_EDITABLES` en `config.py`), y todo
+lo demás sigue siendo de archivo:
+
+| Clave | A dónde va |
+|---|---|
+| `intervalo_minutos`, `al_arrancar` | `planificador` |
+| `ssh_usuario`, `ssh_password` | `ssh` |
+| `remoto`, `remoto_rama`, `remoto_usuario`, `remoto_token`, `remoto_cada` | `almacen` |
+| `fondo_login` | `web` |
+
+Eran cinco. Las cinco del repositorio remoto se añadieron por una razón que se
+puede decir en una línea: **un token caduca y se rota**, igual que la clave de
+la flota, y exigir un root, un SSH y un editor para eso lleva a que no se haga —
+o a que la copia de fuera se quede fallando meses. Las **rutas locales**, en
+cambio, siguen siendo de archivo, y la diferencia no es de importancia sino de
+naturaleza: cambiar a dónde se replica es apuntar una copia adicional, mientras
+que apuntar los respaldos a otro sitio del disco sería **dejar de guardarlos
+donde todo el mundo cree que están**, sin que nada lo delate.
 
 Las credenciales SSH **sí** están en esa lista, y el precio hay que decirlo
 claro: **quien entre al panel como administrador puede cambiar con qué
-credenciales se entra a los routers.** Se aceptó porque pedir un root y un
-editor para rotar la clave de la flota llevaba a que no se rotara nunca. El
-archivo de ajustes se escribe con `0600` por eso mismo, y el cambio queda en la
-auditoría — el usuario sí, la clave nunca.
+credenciales se entra a los routers, y a qué máquina de internet salen las
+configuraciones.** Se aceptó porque pedir un root y un editor para rotar la
+clave de la flota llevaba a que no se rotara nunca. El archivo de ajustes se
+escribe con `0600` por eso mismo, y el cambio queda en la auditoría — el usuario
+y la dirección del remoto sí, la clave y el token nunca.
 
 Tres detalles del programador que se notan con flotas grandes:
 
@@ -1212,11 +1325,14 @@ forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
 - **No restaura equipos.** Ni el `.rsc` ni el `.backup`. Eso es a mano, con la
   cabeza puesta y mirando la versión de RouterOS.
 - **No edita las rutas ni la configuración general.** Solo la lista blanca de
-  `AJUSTES_EDITABLES`. Las rutas del repositorio, el remoto de replicación y
-  Telegram (`telegram.token`, `telegram.chat_id` y `telegram.modo`: `resumen`,
-  `detalle` o `ninguno`) viven en `config.yaml`, que se toca con un editor y
-  con root. El panel escribe únicamente bajo `/root/mkbackup`: el inventario,
-  los ajustes, las cuentas, la auditoría y la imagen de fondo del login.
+  `AJUSTES_EDITABLES`. Las rutas locales —el repositorio, los binarios, el
+  inventario— y Telegram (`telegram.token`, `telegram.chat_id` y
+  `telegram.modo`: `resumen`, `detalle` o `ninguno`) viven en `config.yaml`, que
+  se toca con un editor y con root. El repositorio **remoto** sí se configura
+  desde el panel, y por qué esa distinción está explicado en
+  [Ajustes desde el panel](#ajustes-desde-el-panel). El panel escribe únicamente
+  bajo `/root/mkbackup`: el inventario, los ajustes, las cuentas, la auditoría y
+  la imagen de fondo del login.
 - **No enseña los secretos de las configuraciones.** El diff los tapa (ver
   arriba). Se ve qué cambió, no lo que dice.
 - **No tiene HTTPS propio, ni API REST, ni 2FA, ni recuperación de clave por
@@ -1253,13 +1369,128 @@ fuera el estado.
 
 ---
 
-## Replicación off-site
+## Subir los respaldos fuera del servidor
 
-Si `mostrar_secretos: true` (por defecto), el repo contiene passwords PPPoE, PSK
-de wireless y secrets de VPN **en texto plano**. Replicarlo a GitHub, aunque sea
-privado, pone las credenciales de toda tu red en un tercero.
+Mientras el único sitio donde están los respaldos sea este servidor, esto no es
+una copia de seguridad: es un disco. Por eso `mkbackup` puede empujar el
+repositorio de configuraciones a un **repositorio git remoto** al terminar
+cualquier ciclo que haya encontrado algo nuevo.
 
-Para replicar con seguridad, usa un remoto cifrado:
+Replicar ya se podía antes, pero **solo editando `config.yaml` con root**, que
+en la práctica significa que se configuraba el día de la instalación o no se
+configuraba nunca. Ahora se pone desde **Ajustes**: dirección, rama, cada
+cuántos ciclos con cambios se sube, usuario y token.
+
+> **⚠ Ese repositorio tiene que ser PRIVADO.**
+>
+> Con `export.mostrar_secretos: true` —que es el valor **por defecto**— los
+> `.rsc` llevan dentro las **contraseñas PPPoE, las PSK de wifi y los secretos
+> de VPN de tus clientes, en texto plano**. Lo que se sube ahí no es "un
+> respaldo de configuraciones": son las credenciales de la red de otra gente.
+>
+> Un repositorio público, o uno privado de una cuenta compartida con media
+> oficina, es repartirlas. Si el remoto no puede ser privado de verdad, las dos
+> únicas salidas son un **remoto cifrado** (más abajo) o `mostrar_secretos:
+> false`, sabiendo que entonces el respaldo ya no sirve para restaurar
+> credenciales.
+
+| Ajuste | Qué es |
+|---|---|
+| **Dirección del repositorio** | `https://…`, `ssh://…` o `git@servidor:empresa/repo.git`. Vacío = no se sube a ningún sitio. |
+| **Rama** | La rama del remoto. Vacío = la misma que se usa aquí. |
+| **Cada cuántos ciclos con cambios** | `1` = en cuanto hay algo nuevo. `0` = no subir, sin borrar la dirección. |
+| **Usuario** | Casi nunca importa —GitHub y GitLab miran el token— pero hay servidores que sí. Vacío = `x-access-token`. |
+| **Token de acceso** | La credencial de un repositorio privado por HTTPS. Por SSH se deja vacío: ahí manda la llave del servidor. |
+
+**Solo se admiten `https://`, `ssh://` y `git@…`.** Nada de `http://` sin
+cifrar, y nada de rutas locales ni de esquemas raros. La dirección la escribe un
+administrador, pero es lo que decide **a qué máquina de internet salen las
+configuraciones de los clientes con sus claves dentro**: una lista de esquemas
+conocidos es barata y cierra la puerta a que un descuido —o una cuenta del panel
+comprometida— lo mande a otro sitio por un protocolo que nadie esperaba.
+
+El token, como la clave de los routers, **no vuelve al navegador ni para
+rellenar el campo**: vacío significa "deja el que hay". Si se guardara la cadena
+vacía, abrir esta pantalla y pulsar Guardar dejaría la subida sin credencial y
+fallando en silencio. Borrar la dirección **sí** borra el token: una credencial
+que ya no sirve para nada es un secreto guardado sin motivo.
+
+### El token no va dentro de la URL
+
+Lo habitual es meter la credencial en la propia dirección
+(`https://usuario:token@github.com/…`). Aquí **no**, y la razón es concreta: esa
+URL se guarda en `.git/config`, o sea que queda **escrita en el disco**; viaja
+en **cada copia del repositorio** que alguien haga; y sale tal cual en el
+**mensaje de error de cualquier fallo de red**, que es el mensaje que acaba en
+el log, en el panel y en el aviso de Telegram.
+
+En vez de eso, la credencial se pasa como cabecera `http.extraheader` en la
+línea de comandos de **esa** orden de git concreta (`Almacen._credencial` en
+`store.py`) y **muere con ella**. No queda escrita en ningún lado.
+
+Y como la credencial viaja en los argumentos de git, los errores de git **no se
+vuelcan tal cual**: pasan por un filtro que sustituye el token —y su versión
+codificada— por `«oculto»` antes de que el mensaje salga a ningún sitio
+(`_git(..., tapar=…)`). Un token que se filtra por el mensaje de error de la
+operación que lo usa es la forma clásica de perderlo.
+
+Un detalle que parece menor y no lo es: la subida corre con
+`GIT_TERMINAL_PROMPT=0` (y `GIT_ASKPASS`/`SSH_ASKPASS` vacíos). Sin eso, un
+remoto que pide credenciales deja el proceso **parado esperando a alguien que no
+hay**. En un servicio desatendido, un push que se cuelga es peor que un push que
+falla: el que falla se ve.
+
+### "Probar la conexión"
+
+Al lado del formulario hay un botón que hace un `git ls-remote --heads`:
+pregunta qué ramas tiene el remoto y **no escribe nada**. Contesta con la lista
+de ramas, o con "se llega al repositorio, y está vacío (el primer push lo
+llena)", o con el motivo del fallo ya tapado.
+
+Existe porque la alternativa para saber si el token vale era **esperar al
+próximo ciclo con cambios y leer el log**, y quien acaba de pegar un token
+quiere saberlo ahora. Cada prueba, salga bien o mal, queda en la auditoría.
+
+### Cada cuántos ciclos, y los pendientes
+
+`remoto_cada` agrupa varios ciclos en un solo push. Con una flota grande y un
+remoto lento tiene sentido, y **no se pierde nada**: lo que se sube es el
+histórico entero, así que juntar tres ciclos en un push deja el remoto
+exactamente igual que hacer tres. `0` apaga la subida sin borrar la dirección,
+que es lo que quieres para pararla un rato sin tener que volver a pegar el token
+después.
+
+Los ciclos que se saltan **se cuentan**, y el contador se enseña. Un contador
+parado en 0 y uno en 40 son dos situaciones muy distintas y desde fuera se verían
+igual. Si un push falla, los pendientes **no se ponen a cero**: esos commits no
+salieron de aquí, y la próxima vez hay que volver a intentarlo aunque no toque
+por contador.
+
+Los **renombrados también cuentan como cambio**. Si solo se replicara cuando
+cambia una configuración, el remoto se quedaría con los nombres viejos de los
+equipos que se identificaron solos.
+
+### El resultado de la última subida se ve en el panel
+
+Cómo fue la última subida se guarda en **`replica.json`**, junto al archivo de
+estado, y Ajustes lo enseña: cuándo, si salió bien, el detalle —o el error de
+git, ya tapado— y cuántos ciclos con cambios quedan sin subir.
+
+No es adorno. Sin eso, saber si los respaldos están llegando al remoto exige
+entrar por SSH al servidor y leer el journal, o sea que no lo mira nadie. Y
+**una copia fuera que lleva tres semanas fallando y nadie lo sabe es lo mismo
+que no tener copia fuera**, con el agravante de que se cree que sí. Un push
+fallido va además al log y a la lista de fallos del ciclo, así que sale por
+Telegram como un equipo más que no salió bien.
+
+Escribir `replica.json` **nunca puede tumbar un ciclo**: si no se puede escribir,
+se avisa en el log y el respaldo sigue.
+
+### Si no puede ser privado: remoto cifrado
+
+Aunque el repositorio sea privado, replicarlo a GitHub pone las credenciales de
+toda tu red en un tercero. Si eso no es aceptable —y con secretos dentro hay
+motivos para que no lo sea— la salida es un remoto cifrado:
 
 ```bash
 apt install git-remote-gcrypt
@@ -1271,6 +1502,12 @@ gpg --batch --gen-key                    # clave dedicada, como root
 `git-remote-gcrypt` cifra los objetos antes de subirlos: el remoto ve blobs
 opacos. **Guarda la clave GPG fuera del servidor** — sin ella el mirror es
 ilegible, y un mirror que no se puede descifrar no es un respaldo.
+
+Esta dirección **se pone en `config.yaml` con root, no desde el panel**:
+`gcrypt::…` no empieza por ninguno de los tres esquemas que el panel acepta, y
+la lista de esquemas no se abre para esto. Es coherente con lo que es: un remoto
+cifrado exige además una clave GPG en el servidor, o sea que ya hace falta
+entrar por SSH. Lo que se configura desde la web es el caso normal.
 
 ---
 
@@ -1341,6 +1578,7 @@ Los archivos de datos, todos bajo `/root/mkbackup`:
 | `binarios/` | Los `.backup`, con retención | el respaldo |
 | `inventory.csv` | La flota | los dos |
 | `estado.json` | El ciclo en curso, con latido | el respaldo |
+| `replica.json` | Cómo fue la última subida al remoto | el respaldo |
 | `programador.json` | Cuándo se consultó cada equipo | el programador |
 | `equipos.json` | Modelo, versión y último respaldo bueno | el respaldo |
 | `ajustes.json` | Lo que se cambia desde el panel | el panel |

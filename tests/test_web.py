@@ -216,6 +216,17 @@ def probar_limites():
             comprobar("80 peticiones seguidas se atienden todas (mas del tope)",
                       True)
 
+        # Se espera un poco a mirarlo. La plaza se suelta en shutdown_request,
+        # o sea en el hilo de la conexion, y el cliente ya ha leido su respuesta
+        # y cerrado antes de que ese hilo termine. Comprobarlo en el instante
+        # exacto medía si la maquina va rapida, no si las plazas se devuelven:
+        # fallaba una vez de cada tantas por 127 de 128. Lo que hay que
+        # demostrar es que vuelven, no que vuelven antes que el cliente.
+        limite = time.monotonic() + 5
+        while srv._plazas._value != web.CONEXIONES_MAXIMAS:
+            if time.monotonic() > limite:
+                break
+            time.sleep(0.02)
         libres = srv._plazas._value
         comprobar(f"las plazas vuelven a su sitio ({libres} de "
                   f"{web.CONEXIONES_MAXIMAS})",

@@ -360,6 +360,66 @@ def main() -> None:
             comprobar("con el aviso a la vista",
                       "Equipo-Baja ya no esta" in html)
 
+            print("\n--- Borrar los datos de un equipo dado de baja ---")
+            # Se fabrica lo que deja un equipo al que se dio de baja despues de
+            # haberlo respaldado: un .rsc en el repositorio del que ya no
+            # responde ninguna ficha del inventario. Es lo unico que esta
+            # pantalla puede borrar.
+            from mkbackup.device import Resultado
+            from mkbackup.inventory import Equipo
+            from mkbackup.store import Almacen
+
+            almacen = Almacen(panel.cfg)
+            almacen.inicializar()
+            ido = Equipo(nombre="Equipo-Ido", ip="10.20.0.44",
+                         empresa="Empresa Uno")
+            almacen.guardar(Resultado(equipo=ido,
+                                      export="/ip dns\nset servers=8.8.8.8\n"))
+            archivo = Path(panel.cfg.almacen.git) / ido.ruta_relativa
+            comprobar("el equipo dado de baja dejo su respaldo", archivo.is_file())
+
+            codigo, html = panel.pedir("/ajustes")
+            comprobar("Ajustes ofrece borrarlo",
+                      'action="/ajustes/datos/borrar"' in html
+                      and "Equipo-Ido" in html)
+            comprobar("y no ofrece borrar al que sigue de alta",
+                      'value="empresa-uno/Equipo-Uno.rsc"' not in html)
+
+            # Escribir mal el nombre es el unico freno que hay entre este boton
+            # y perder los respaldos de otro. Tiene que parar de verdad.
+            codigo, html = panel.pedir(
+                "/ajustes/datos/borrar",
+                {"ruta": ido.ruta_relativa, "modo": "purgar",
+                 "confirmacion": "equipo-ido"},
+            )
+            comprobar(f"con la confirmacion mal escrita se niega (dio {codigo})",
+                      codigo == 400)
+            comprobar("y dice que hay que escribir el nombre exacto",
+                      "nombre exacto" in html)
+            comprobar("sin haber borrado nada", archivo.is_file())
+
+            # Una ruta que no esta en la lista tampoco vale, aunque la mande el
+            # formulario: un formulario se edita.
+            codigo, _ = panel.pedir(
+                "/ajustes/datos/borrar",
+                {"ruta": "empresa-uno/Equipo-Uno.rsc", "modo": "retirar",
+                 "confirmacion": "Equipo-Uno"},
+            )
+            comprobar(f"una ruta que no esta dada de baja se rechaza (dio {codigo})",
+                      codigo == 404)
+
+            codigo, html = panel.pedir(
+                "/ajustes/datos/borrar",
+                {"ruta": ido.ruta_relativa, "modo": "retirar",
+                 "confirmacion": "Equipo-Ido"},
+            )
+            comprobar(f"con el nombre bien escrito borra (dio {codigo})",
+                      codigo == 200)
+            comprobar("el respaldo ya no esta en el repositorio",
+                      not archivo.exists())
+            comprobar("y el panel dice que se puede recuperar",
+                      "recuperar" in html)
+
             print("\n--- Un error no deja el cuerpo del POST en el socket ---")
             # Casi todos los caminos de error cortan ANTES de leer el cuerpo:
             # "no tienes permiso", "solo lectura", "esa pagina no existe". Con

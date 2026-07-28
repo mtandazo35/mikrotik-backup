@@ -61,7 +61,7 @@ from .inventory import (
 from . import imagen
 from .planificador import estado_programador, pedir_ciclo
 from .sesion import COOKIE, Sesiones
-from .store import Almacen
+from .store import Almacen, ErrorAlmacen, leer_replica
 from .auditoria import Auditoria
 from .usuarios import (
     EDITAR,
@@ -1283,6 +1283,12 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes/identidades":
             if self._permite("ajustes"):
                 self._identidades_masivo()
+        elif ruta == "/ajustes/remoto":
+            if self._permite("ajustes"):
+                self._ajustes_remoto()
+        elif ruta == "/ajustes/remoto/probar":
+            if self._permite("ajustes"):
+                self._probar_remoto()
         elif ruta == "/ajustes/ssh":
             if self._permite("ajustes"):
                 self._ajustes_ssh()
@@ -1292,6 +1298,9 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes/fondo/quitar":
             if self._permite("ajustes"):
                 self._ajustes_fondo_quitar()
+        elif ruta == "/ajustes/datos/borrar":
+            if self._permite("ajustes"):
+                self._borrar_datos()
         elif ruta == "/usuarios/nuevo":
             if self._permite("usuarios"):
                 self._alta_usuario()
@@ -2204,8 +2213,135 @@ class Manejador(BaseHTTPRequestHandler):
             mensaje=mensaje,
             error=error,
             fondo=self._marca_fondo(),
+            replica=leer_replica(self.cfg),
+            huerfanos=self._huerfanos(),
             **self._contexto_identidades(),
         ), codigo)
+
+    def _huerfanos(self) -> list[dict]:
+        """Lo que queda en el repositorio de equipos que ya no estan de alta.
+
+        Un equipo dado de baja no esta en el inventario, asi que no tiene
+        empresa contra la que calcular el alcance. Es la MISMA regla que en
+        _cambios: quien no lo ve todo no ve ninguno. Aqui pesa mas todavia,
+        porque no es mirar sino borrar: adivinar la empresa por el nombre de su
+        carpeta seria dejar que quien acierte el slug se lleve por delante los
+        respaldos del cliente de al lado.
+        """
+        if not self.usuario.alcance.todo:
+            return []
+
+        # A proposito el crudo y no _inventario_tolerante: aquel devuelve una
+        # lista VACIA cuando el CSV no se puede leer, y con el inventario vacio
+        # todos los archivos del repositorio pareceria que son de equipos dados
+        # de baja. Ofrecer borrar la flota entera porque el inventario no se
+        # pudo leer es el fallo que aqui no se puede permitir: mejor una lista
+        # vacia y el resto de Ajustes funcionando.
+        try:
+            equipos, _ = self._inventario()
+        except ErrorInventario as exc:
+            log.warning("No se puede listar lo dado de baja: %s", exc)
+            return []
+
+        try:
+            return Almacen(self.cfg).huerfanos(equipos)
+        except (ErrorAlmacen, OSError) as exc:
+            log.warning("No se pudo leer el repositorio: %s", exc)
+            return []
+
+    def _borrar_datos(self) -> None:
+        """Borra del repositorio los respaldos de un equipo dado de baja.
+
+        Dos formas, y elige quien borra: 'retirar' lo quita de la version de
+        hoy y deja su historia dentro de git (se puede recuperar), y 'purgar'
+        reescribe el repositorio para que no quede en ninguna version (no se
+        puede). La segunda existe porque un cliente que se va puede pedir que
+        no quede nada suyo, y "esta borrado pero sigue en el historial" no es
+        eso.
+        """
+        # Dos permisos, y los dos hacen falta: la ruta esta bajo /ajustes, pero
+        # lo que hace es tirar los datos de un equipo. Ver /ajustes/identidades.
+        if not self._editable("equipos.baja"):
+            return
+        campos = self._campos()
+        if campos is None:
+            return
+
+        ruta = campos.get("ruta", "").strip()
+        # Lista blanca con caida al lado prudente: un modo inventado desde
+        # fuera no puede convertirse en el irreversible.
+        modo = campos.get("modo", "retirar")
+        if modo not in ("retirar", "purgar"):
+            modo = "retirar"
+        confirmacion = campos.get("confirmacion", "").strip()
+
+        # Que el formulario mande una ruta no significa nada: un formulario se
+        # edita. La ruta tiene que estar de verdad en la lista de dados de
+        # baja QUE ESTA CUENTA VE, porque si no, escribirla a mano seria borrar
+        # el respaldo de un equipo que sigue de alta o de otro cliente.
+        lista = self._huerfanos()
+        objetivo = next((h for h in lista if h["ruta"] == ruta), None)
+        if objetivo is None:
+            self._pintar_ajustes(
+                error="Ese archivo no esta en la lista de equipos dados de baja. "
+                      "Aqui solo se puede borrar lo de los equipos que ya no "
+                      "estan en el inventario.",
+                codigo=404,
+            )
+            return
+
+        # Escribir el nombre es lo unico que separa este boton de un clic por
+        # error en la fila de al lado. Se compara tal cual, sin recortes ni
+        # mayusculas: la gracia es que haya que leer cual se esta borrando.
+        if confirmacion != objetivo["nombre"]:
+            self._pintar_ajustes(
+                error=f"Para borrar los datos de '{objetivo['nombre']}' hay que "
+                      "escribir su nombre exacto en el campo de confirmacion. "
+                      "No se ha borrado nada.",
+                codigo=400,
+            )
+            return
+
+        # Mientras el programador corre un ciclo, NO. El es otro proceso y esta
+        # commiteando en este mismo repositorio; purgar ademas lo reescribe
+        # entero. Dos escritores sobre el mismo indice de git es justo lo que
+        # este proyecto evita en todas partes, y el candado del panel no cruza
+        # el limite del proceso.
+        if estado_programador(self.cfg).get("corriendo"):
+            self._pintar_ajustes(
+                error="Ahora mismo hay un respaldo en marcha y esta escribiendo "
+                      "en el mismo repositorio. Espera a que termine.",
+                codigo=409,
+            )
+            return
+
+        with self.ctx.candado:
+            almacen = Almacen(self.cfg)
+            if modo == "purgar":
+                hecho = almacen.purgar(ruta)
+            else:
+                hecho = almacen.retirar(ruta)
+
+        if not hecho:
+            self._pintar_ajustes(
+                error=f"No se pudo borrar '{objetivo['nombre']}'. El motivo esta "
+                      "en el registro del servicio.",
+                codigo=500,
+            )
+            return
+
+        # Borrar datos tiene que dejar rastro de quien y de que: es lo primero
+        # que se pregunta cuando alguien echa de menos un respaldo.
+        log.info("%s borro los datos de %s (%s)", self.usuario.nombre, ruta, modo)
+        self._anotar("datos_borrados", f"{ruta} ({modo})")
+
+        if modo == "purgar":
+            aviso = (f"Borrado '{objetivo['nombre']}' de todo el repositorio, "
+                     "incluida su historia. No se puede deshacer.")
+        else:
+            aviso = (f"Quitado '{objetivo['nombre']}' del repositorio. Sus "
+                     "versiones anteriores siguen en git y se pueden recuperar.")
+        self._pintar_ajustes(mensaje=aviso)
 
     def _contexto_identidades(self) -> dict:
         """Lo que sabe la pantalla sobre los nombres de los routers.
@@ -2333,6 +2469,109 @@ class Manejador(BaseHTTPRequestHandler):
 
     def _fondo_error(self, mensaje: str) -> None:
         self._pintar_ajustes(error=mensaje, codigo=400)
+
+    def _ajustes_remoto(self) -> None:
+        """A donde se suben los respaldos, y con que credencial."""
+        campos = self._campos()
+        if campos is None:
+            return
+
+        url = campos.get("remoto", "").strip()
+        # Solo git: nada de rutas locales ni de esquemas raros. La direccion la
+        # escribe un administrador, pero es lo que decide a QUE maquina de
+        # internet salen las configuraciones de los clientes, con sus claves
+        # dentro. Una lista de esquemas conocidos es barata y cierra la puerta a
+        # que un descuido (o una cuenta comprometida) lo mande a otro sitio por
+        # un protocolo que nadie esperaba.
+        if url and not url.startswith(("https://", "ssh://", "git@")):
+            self._pintar_ajustes(
+                error="La direccion tiene que empezar por https:// o por ssh:// "
+                      "(o ser del tipo git@servidor:empresa/repo.git). No se "
+                      "admite http:// sin cifrar: por ahi viajarian las "
+                      "configuraciones y el token.",
+                codigo=400,
+            )
+            return
+
+        # Y NO se admite el token metido dentro de la direccion, que es la
+        # costumbre ("https://oauth2:TOKEN@gitlab.com/..."). Pegado ahi, ese
+        # token deja de ser un secreto: se escribe en .git/config, viaja en cada
+        # copia del repositorio, sale en el texto de "replicado a ..." que se
+        # guarda y se pinta en esta misma pantalla, y aparece en el mensaje de
+        # cualquier error de red. El campo de abajo existe justo para que no
+        # haga falta; si se admitiera esto, todo el cuidado del otro camino no
+        # serviria de nada.
+        if url.startswith("https://") and "@" in url.split("/", 3)[2]:
+            self._pintar_ajustes(
+                error="No pongas el usuario ni el token dentro de la direccion. "
+                      "Quedaria escrito en el disco y saldria en los mensajes de "
+                      "error. Deja la direccion limpia y ponlos en los campos de "
+                      "abajo.",
+                codigo=400,
+            )
+            return
+
+        try:
+            cada = int(campos.get("remoto_cada", "1") or 0)
+        except ValueError:
+            cada = -1
+        if cada < 0:
+            self._pintar_ajustes(
+                error="'Cada cuantos ciclos' tiene que ser 0 o mas.", codigo=400,
+            )
+            return
+
+        cambios = {
+            "remoto": url,
+            "remoto_rama": campos.get("remoto_rama", "").strip(),
+            "remoto_usuario": campos.get("remoto_usuario", "").strip(),
+            "remoto_cada": cada,
+        }
+        # Vacio significa "no lo toques", igual que la clave de los routers. Si
+        # se guardara la cadena vacia, abrir esta pantalla y pulsar Guardar
+        # dejaria la subida sin credencial y fallando en silencio hasta que
+        # alguien mirase el log.
+        token = campos.get("remoto_token", "")
+        if token:
+            cambios["remoto_token"] = token
+        # Quitar la direccion es apagar la subida: la credencial que quedara
+        # ahi no serviria para nada y seria un secreto guardado sin motivo.
+        if not url:
+            cambios["remoto_token"] = ""
+
+        self.cfg.guardar_ajustes(cambios)
+        log.info("%s cambio el repositorio remoto (%s%s)", self.usuario.nombre,
+                 url or "ninguno", ", token nuevo" if token else "")
+        # La direccion si, el token NUNCA.
+        self._anotar("remoto", f"{url or 'ninguno'}"
+                               + (", token nuevo" if token else ""))
+        self._pintar_ajustes(
+            mensaje="Guardado. Pruebala antes de fiarte: el proximo ciclo con "
+                    "cambios la usara."
+            if url else "Guardado. Los respaldos se quedan solo en este servidor."
+        )
+
+    def _probar_remoto(self) -> None:
+        """Pregunta al remoto que ramas tiene. No escribe nada."""
+        if not self._tragar_cuerpo():
+            return
+        try:
+            detalle = Almacen(self.cfg).probar_remoto()
+        except ErrorAlmacen as exc:
+            # El mensaje de git ya viene con la credencial tapada (ver
+            # store._git): aqui llega listo para ensenarlo.
+            self._anotar("remoto_prueba", "fallo")
+            self._pintar_ajustes(error=f"No se pudo: {exc}", codigo=400)
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("Fallo inesperado probando el remoto")
+            self._pintar_ajustes(
+                error="No se pudo probar la conexion. Mira el registro del servicio.",
+                codigo=500,
+            )
+            return
+        self._anotar("remoto_prueba", "ok")
+        self._pintar_ajustes(mensaje=detalle)
 
     def _ajustes_ssh(self) -> None:
         """Cambia el usuario y la clave con los que se entra a los routers."""

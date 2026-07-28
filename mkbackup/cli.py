@@ -27,7 +27,7 @@ from .hechos import Hechos
 from .inventory import Equipo, ErrorInventario, cargar
 from .notify import Notificador
 from .sesion import hashear
-from .store import Almacen, ErrorAlmacen
+from .store import Almacen, ErrorAlmacen, anotar_replica, leer_replica
 
 log = logging.getLogger("mkbackup")
 
@@ -401,6 +401,44 @@ def _renombrar_provisionales(
 # vez: el resultado del equipo, lo que hizo el almacen y si fallo.
 
 
+def _replicar(cfg: Config, almacen: Almacen, fallidos: list) -> None:
+    """Sube el repositorio al remoto, si toca. Deja constancia de como fue.
+
+    "Si toca" es lo que hace `remoto_cada`: con una flota grande y un remoto
+    lento no hace falta empujar en cada ciclo, porque lo que se sube es el
+    historico entero y agrupar varios no pierde nada. Los ciclos que se saltan
+    se cuentan para poder decir cuantos commits llevan sin salir de aqui: un
+    contador parado en 0 y uno en 40 son dos situaciones muy distintas y desde
+    fuera se ven igual.
+    """
+    previo = leer_replica(cfg)
+    pendientes = int(previo.get("pendientes", 0) or 0) + 1
+    cada = max(0, int(cfg.almacen.remoto_cada or 0))
+
+    if cada == 0:
+        log.debug("Subida al remoto apagada (remoto_cada = 0)")
+        anotar_replica(cfg, previo.get("ok", False),
+                       "apagada: los cambios se quedan en el servidor", pendientes)
+        return
+    if pendientes < cada:
+        log.info("Subida al remoto: faltan %d ciclo(s) con cambios",
+                 cada - pendientes)
+        anotar_replica(cfg, previo.get("ok", False),
+                       f"esperando a juntar {cada} ciclos con cambios", pendientes)
+        return
+
+    try:
+        detalle = almacen.replicar()
+        log.info("Replicacion: %s", detalle)
+        anotar_replica(cfg, True, detalle, 0)
+    except ErrorAlmacen as exc:
+        log.error("Replicacion fallo: %s", exc)
+        # Los pendientes NO se ponen a cero: no salieron de aqui, y la proxima
+        # vez hay que volver a intentarlo aunque no toque por contador.
+        anotar_replica(cfg, False, str(exc), pendientes)
+        fallidos.append(("__replicacion__", str(exc)))
+
+
 def _anotar(hechos: Hechos, nombre: str, **campos) -> None:
     """Anota lo observado de un equipo. NUNCA lanza.
 
@@ -640,11 +678,7 @@ def ejecutar(
         # Los renombrados tambien son commits: si solo se replicara cuando hay
         # cambios de configuracion, el remoto se quedaria con los nombres viejos.
         if cfg.almacen.remoto and (cambios or renombrados):
-            try:
-                log.info("Replicacion: %s", almacen.replicar())
-            except ErrorAlmacen as exc:
-                log.error("Replicacion fallo: %s", exc)
-                fallidos.append(("__replicacion__", str(exc)))
+            _replicar(cfg, almacen, fallidos)
 
         log.info(
             "Terminado en %.0fs - %d/%d correctos, %d con cambios, %d fallidos",

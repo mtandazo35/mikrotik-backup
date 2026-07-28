@@ -522,6 +522,21 @@ ESTILO = """
   .vista-fondo img { display: block; width: 100%; height: auto; max-height: 170px;
                      object-fit: cover; }
 
+  /* --- Borrar los datos de un equipo ---
+     El formulario va en una fila propia DEBAJO de la del equipo, y no en una
+     columna mas: un desplegable, un campo de texto y un boton no caben en una
+     celda de una tabla que ya lleva cinco columnas dentro de media tarjeta.
+     Asi arriba se sigue leyendo una tabla y abajo queda claro a que fila
+     pertenece el formulario. Hay que repetir el colspan en el selector porque
+     si no manda la regla de la fila "no hay nada", que centra y da aire. */
+  .tabla-caja tr.borrado td[colspan] {
+    text-align: left; white-space: normal; padding: .35rem .7rem 1.1rem;
+    border-bottom: 1px solid var(--borde);
+  }
+  .linea-borrar { display: flex; gap: .7rem; align-items: flex-end;
+                  flex-wrap: wrap; }
+  .linea-borrar .campo { margin: 0; flex: 1 1 190px; min-width: 0; }
+
   .paginador { display: flex; align-items: center; justify-content: center;
                 gap: .8rem; margin-top: .9rem; flex-wrap: wrap; }
   /* El boton de un extremo no se esconde, se apaga: si desaparece, los otros
@@ -2070,9 +2085,202 @@ if (INICIAL && !INICIAL.vacio && INICIAL.corriendo) {
 """
 
 
+def _bloque_remoto(cfg, replica: dict, zona) -> str:
+    """La tarjeta de 'a donde se suben los respaldos'."""
+    url = cfg.almacen.remoto
+    por_ssh = url.startswith(("git@", "ssh://"))
+
+    if not url:
+        estado = ('<p class="sub">Ahora mismo los respaldos <b>solo estan en este '
+                  "servidor</b>. Si se pierde el disco, se pierde todo el "
+                  "historico.</p>")
+    elif not replica:
+        estado = ('<p class="sub">Configurado, pero todavia no se ha subido nada. '
+                  "Se sube en cuanto un ciclo encuentre un cambio.</p>")
+    else:
+        cuando = fecha(replica.get("cuando", ""), zona)
+        pendientes = int(replica.get("pendientes", 0) or 0)
+        cola = (f" Quedan <b>{esc(pendientes)}</b> ciclo(s) con cambios sin subir."
+                if pendientes else "")
+        if replica.get("ok"):
+            estado = (f'<div class="bien">Ultima subida: {esc(cuando)}. '
+                      f'{esc(replica.get("detalle", ""))}{cola}</div>')
+        else:
+            estado = (f'<div class="error">La ultima subida fallo ({esc(cuando)}): '
+                      f'{esc(replica.get("detalle", ""))}{cola}</div>')
+
+    # La credencial NUNCA vuelve al navegador, ni para rellenar el campo. Vacio
+    # significa "deja la que hay", igual que en el acceso a los routers.
+    if por_ssh:
+        pista_clave = ("Con una direccion SSH esto no se usa: manda la llave del "
+                       "servidor. Deja los dos campos vacios.")
+    elif cfg.almacen.remoto_token:
+        pista_clave = "Hay un token guardado. Vacio para no tocarlo."
+    else:
+        pista_clave = ("No hay ninguno. Sin token, un repositorio privado por "
+                       "HTTPS rechaza la subida.")
+
+    return f"""
+    <p class="sub">Ademas de guardarlos aqui, subirlos a un repositorio git.
+       Es lo que convierte esto en una copia de verdad: mientras el unico sitio
+       sea este servidor, un disco roto se lleva todo el historico.</p>
+    {estado}
+    <form method="post" action="/ajustes/remoto" class="separado">
+      <div class="campo">
+        <label for="remoto">Direccion del repositorio</label>
+        <input id="remoto" type="text" name="remoto" value="{esc(url)}"
+               autocomplete="off" spellcheck="false"
+               placeholder="https://github.com/empresa/respaldos.git">
+        <div class="pista">Vacio para no subir a ningun sitio. Por HTTPS se
+           pide el token de abajo; por SSH (<code>git@...</code>) manda la llave
+           del servidor. <b>Que sea privado</b>: si los respaldos llevan
+           secretos, ahi dentro estan las credenciales de tus clientes.</div>
+      </div>
+      <div class="rejilla">
+        <div class="campo">
+          <label for="remoto-rama">Rama</label>
+          <input id="remoto-rama" type="text" name="remoto_rama"
+                 value="{esc(cfg.almacen.remoto_rama)}" autocomplete="off"
+                 placeholder="la misma que aqui">
+        </div>
+        <div class="campo">
+          <label for="remoto-cada">Cada cuantos ciclos con cambios</label>
+          <input id="remoto-cada" type="number" name="remoto_cada" min="0"
+                 value="{esc(cfg.almacen.remoto_cada)}">
+          <div class="pista">1 = en cuanto hay algo nuevo. 0 = no subir, sin
+             borrar la direccion.</div>
+        </div>
+      </div>
+      <div class="rejilla">
+        <div class="campo">
+          <label for="remoto-usuario">Usuario</label>
+          <input id="remoto-usuario" type="text" name="remoto_usuario"
+                 value="{esc(cfg.almacen.remoto_usuario)}" autocomplete="off"
+                 placeholder="x-access-token">
+        </div>
+        <div class="campo">
+          <label for="remoto-token">Token de acceso</label>
+          <input id="remoto-token" type="password" name="remoto_token" value=""
+                 autocomplete="new-password">
+          <div class="pista">{esc(pista_clave)}</div>
+        </div>
+      </div>
+      <button type="submit">Guardar</button>
+    </form>
+
+    <form method="post" action="/ajustes/remoto/probar" class="separado ahora">
+      <button type="submit" class="secundario">Probar la conexion</button>
+      <span class="pista">Pregunta que ramas hay y no escribe nada. Sirve para
+        saber si el token vale ahora, en vez de enterarse en el proximo ciclo.</span>
+    </form>
+    <p class="pista separado">El token se guarda en
+       <code>{esc(cfg.almacen.ajustes)}</code>, que es de root y 0600, y nunca
+       vuelve a esta pantalla. No se mete en la direccion del repositorio a
+       proposito: ahi quedaria escrito en el disco y saldria en el mensaje de
+       cualquier error de red.</p>"""
+
+
+def _aviso_remoto_al_borrar(cfg) -> str:
+    """Lo que hay que decir si estos respaldos ademas se suben a otro sitio.
+
+    Es la unica forma de que "borrar los datos de este cliente" signifique de
+    verdad lo que parece. Purgar reescribe ESTE repositorio; la copia que ya
+    esta en el remoto no se entera, y el push siguiente ni siquiera se lo puede
+    llevar por delante -git lo rechaza porque las dos historias ya no encajan-.
+    O sea que quien borre aqui y no toque el remoto se queda convencido de que
+    borro algo que sigue estando, que es la peor forma posible de fallar en
+    esto.
+    """
+    if not cfg.almacen.remoto:
+        return ""
+    return f"""
+    <div class="aviso"><strong>Borrar aqui no borra alli.</strong>
+       Estos respaldos tambien se suben a
+       <code>{esc(cfg.almacen.remoto)}</code>. Si eliges "borrarlo tambien del
+       historial", esta copia se reescribe y la de alla se queda como estaba;
+       ademas, el proximo ciclo no podra subir nada, porque git rechaza un
+       historial que ya no encaja. Para que el borrado sea de verdad hay que ir
+       al remoto y forzar la subida a mano (<code>git push --force</code>), y
+       aun asi el proveedor puede conservar copias suyas un tiempo. Si lo que se
+       pide es que no quede rastro, hay que hacerlo en los dos sitios.</div>"""
+
+
+def _bloque_datos(huerfanos, zona) -> str:
+    """La tabla de lo que queda guardado de equipos que ya no estan de alta.
+
+    Solo salen los dados de baja, y eso hay que decirlo en pantalla: quien
+    abre esto buscando un equipo suyo y no lo encuentra tiene que entender que
+    no es un fallo, sino que ese equipo sigue en el inventario.
+    """
+    if not huerfanos:
+        return """
+    <p class="sub">Aqui salen los equipos que ya NO estan en el inventario pero
+       cuyos respaldos siguen guardados. Dar de baja no borra nada a proposito:
+       esta pantalla es para cuando si hay que borrarlo.</p>
+    <p class="sub">Ahora mismo no hay ninguno: de todo lo que hay guardado
+       responde algun equipo dado de alta.</p>"""
+
+    filas = []
+    for h in huerfanos:
+        # La ruta viaja en un campo oculto y no se compone en el servidor a
+        # partir del nombre: es la misma cadena que salio de la lista, y web.py
+        # la vuelve a buscar en ella antes de tocar nada.
+        ruta = esc(h.get("ruta", ""))
+        nombre = esc(h.get("nombre", ""))
+        cuando = h.get("ultimo") or ""
+        filas.append(f"""
+        <tr>
+          <td><strong>{nombre}</strong></td>
+          <td>{esc(h.get("empresa_carpeta") or "-")}</td>
+          <td>{esc(h.get("versiones", 0))}</td>
+          <td>{esc(h.get("binarios", 0))}</td>
+          <td>{esc(fecha(cuando, zona) if cuando else "-")}</td>
+        </tr>
+        <tr class="borrado">
+          <td colspan="5">
+            <form method="post" action="/ajustes/datos/borrar" class="linea-borrar">
+              <input type="hidden" name="ruta" value="{ruta}">
+              <div class="campo">
+                <label for="modo-{ruta}">Como</label>
+                <select id="modo-{ruta}" name="modo">
+                  <option value="retirar">Quitarlo del repositorio (se puede
+                    recuperar)</option>
+                  <option value="purgar">Borrarlo tambien del historial (no se
+                    puede deshacer)</option>
+                </select>
+              </div>
+              <div class="campo">
+                <label for="conf-{ruta}">Escribe {nombre}</label>
+                <input id="conf-{ruta}" type="text" name="confirmacion" value=""
+                       autocomplete="off" placeholder="{nombre}">
+              </div>
+              <button class="peligro" type="submit">Borrar sus datos</button>
+            </form>
+          </td>
+        </tr>""")
+
+    return f"""
+    <p class="sub">Equipos que ya NO estan en el inventario y de los que aun
+       queda algo guardado. Dar de baja no borra los respaldos a proposito;
+       esto es para cuando si hay que borrarlos.</p>
+    <div class="tabla-caja"><table>
+      <thead><tr><th>Equipo</th><th>Empresa</th><th>Versiones</th>
+        <th>Binarios</th><th>Ultimo cambio</th></tr></thead>
+      <tbody>{"".join(filas)}</tbody>
+    </table></div>
+    <p class="pista separado"><strong>Quitarlo del repositorio</strong> lo saca
+       de la version de hoy y deja sus versiones anteriores dentro de git, asi
+       que se recuperan desde la consola. <strong>Borrarlo tambien del
+       historial</strong> reescribe el repositorio para que no quede en ninguna
+       version: es lo que hay que usar cuando un cliente pide que no quede nada
+       suyo, y despues no hay commit del que sacarlo. Cambian los identificadores
+       de todos los commits, asi que un repositorio ya subido a un remoto queda
+       divergido.</p>"""
+
+
 def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=None,
             sesion=None, fondo: str = "", sondeo=None, equipos_totales: int = 0,
-            equipos_sin_nombre: int = 0) -> str:
+            equipos_sin_nombre: int = 0, replica=None, huerfanos=None) -> str:
     bloque_error = f'<div class="error">{esc(error)}</div>' if error else ""
     bloque_ok = f'<div class="bien">{esc(mensaje)}</div>' if mensaje else ""
 
@@ -2242,14 +2450,29 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
 
   </div>
 
+  <div class="pareja">
   <div class="tarjeta">
     <h2>Nombre de los routers</h2>
     {bloque_identidades}
   </div>
 
-  <div class="tarjeta estrecho">
+  <div class="tarjeta">
+    <h2>A donde se suben los respaldos</h2>
+    {_bloque_remoto(cfg, replica or {}, zona)}
+  </div>
+  </div>
+
+  <div class="pareja">
+  <div class="tarjeta">
     <h2>Pantalla de entrada</h2>
     {bloque_fondo}
+  </div>
+
+  <div class="tarjeta">
+    <h2>Borrar los datos de un equipo</h2>
+    {_aviso_remoto_al_borrar(cfg)}
+    {_bloque_datos(huerfanos or [], zona)}
+  </div>
   </div>
 
   <div class="tarjeta apagado">

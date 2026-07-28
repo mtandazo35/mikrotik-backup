@@ -81,8 +81,31 @@ class ConfigAlmacen:
     # ejecucion porque eso solo habla del ciclo en curso, y aqui hace falta
     # recordar lo de un equipo aunque hoy no le haya tocado.
     hechos: str = "/root/mkbackup/equipos.json"
-    # Remoto opcional para replicar (se recomienda cifrado, ver README).
+    # A donde se suben los respaldos, ademas de guardarlos aqui. Vacio = a
+    # ningun sitio, que es lo que hay recien instalado: el repositorio local ya
+    # es un respaldo, y mandarlo fuera es una decision, no un valor por defecto.
+    # Si los respaldos llevan secretos (export.mostrar_secretos), ese remoto
+    # tiene dentro las credenciales de los clientes: que sea PRIVADO.
     remoto: str = ""
+    # La rama del remoto. Vacio = la misma que aqui.
+    remoto_rama: str = ""
+    # Credencial para un repositorio privado por HTTPS. El usuario casi nunca
+    # importa (GitHub y GitLab miran el token), pero se pide igual porque hay
+    # servidores que si.
+    #
+    # NO va dentro de la URL, que es como se suele hacer: la URL se guarda en
+    # .git/config, viaja en cada copia del repositorio y sale en el log de
+    # cualquier error de red. Se pasa como cabecera en la orden de git y muere
+    # con ella (ver Almacen._credencial).
+    #
+    # Por SSH esto se deja vacio: ahi manda la llave del sistema.
+    remoto_usuario: str = ""
+    remoto_token: str = ""
+    # Cada cuantos ciclos CON CAMBIOS se sube. 1 = en cuanto hay algo nuevo.
+    # Subirlo tiene sentido con una flota grande y un remoto lento: lo que se
+    # sube es el historico entero, asi que agrupar varios ciclos en un push no
+    # pierde nada. 0 apaga la subida sin tener que borrar la direccion.
+    remoto_cada: int = 1
     autor: str = "mkbackup"
     email: str = "mkbackup@localhost"
 
@@ -203,6 +226,16 @@ AJUSTES_EDITABLES = {
     "ssh_usuario": ("ssh", "usuario"),
     "ssh_password": ("ssh", "password"),
     "fondo_login": ("web", "fondo_login"),
+    # A donde se suben los respaldos y con que credencial. Esto SI lo puede
+    # cambiar el panel, a diferencia de las rutas locales: apuntar el respaldo a
+    # otro sitio del disco seria dejar de guardarlo donde se cree, mientras que
+    # cambiar a donde se replica es la clase de dato que se rota (un token
+    # caduca) y que no puede exigir entrar por SSH al servidor cada vez.
+    "remoto": ("almacen", "remoto"),
+    "remoto_rama": ("almacen", "remoto_rama"),
+    "remoto_usuario": ("almacen", "remoto_usuario"),
+    "remoto_token": ("almacen", "remoto_token"),
+    "remoto_cada": ("almacen", "remoto_cada"),
 }
 
 

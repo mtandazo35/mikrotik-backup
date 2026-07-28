@@ -33,8 +33,11 @@ paralelo es el SSH, que ocurre antes.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -51,6 +54,49 @@ class ErrorAlmacen(Exception):
     """No se pudo guardar o versionar."""
 
 
+# --- Como fue la ultima subida al remoto ------------------------------------
+# Lo escribe el proceso que respalda y lo lee el panel, que es otro proceso: por
+# eso va a un archivo y no a una variable. Es pequeno a proposito -cuando, si
+# salio bien y que dijo- porque se lee en cada pintado de Ajustes.
+#
+# Sin esto, saber si los respaldos estan llegando al repositorio remoto exige
+# entrar por SSH al servidor y leer el journal. Una copia fuera que lleva tres
+# semanas fallando y nadie lo sabe es lo mismo que no tener copia fuera.
+
+NOMBRE_REPLICA = "replica.json"
+
+
+def ruta_replica(cfg) -> Path:
+    return Path(cfg.almacen.estado).parent / NOMBRE_REPLICA
+
+
+def leer_replica(cfg) -> dict:
+    """Lo ultimo que se sabe de la subida. NUNCA lanza: lo llama el panel."""
+    try:
+        datos = json.loads(ruta_replica(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def anotar_replica(cfg, ok: bool, detalle: str, pendientes: int = 0) -> None:
+    """Deja constancia de como fue. NUNCA lanza: no puede tumbar un ciclo."""
+    ruta = ruta_replica(cfg)
+    datos = {
+        "cuando": datetime.now(timezone.utc).isoformat(),
+        "ok": bool(ok),
+        "detalle": detalle,
+        "pendientes": int(pendientes),
+    }
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        temporal = ruta.with_suffix(".tmp")
+        temporal.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporal, ruta)
+    except OSError as exc:
+        log.warning("No se pudo anotar el resultado de la subida: %s", exc)
+
+
 @dataclass
 class Guardado:
     equipo: Equipo
@@ -59,19 +105,36 @@ class Guardado:
     binario_guardado: bool = False
 
 
-def _git(repo: Path, *args: str, permitir_fallo: bool = False) -> str:
+def _git(repo: Path, *args: str, permitir_fallo: bool = False,
+         previos: tuple = (), tapar: tuple = (), entorno: dict | None = None) -> str:
+    """Ejecuta git. `previos` van ANTES del subcomando (las opciones -c ...).
+
+    `tapar` son cadenas que no pueden salir en el mensaje de error. Existe por
+    una razon concreta: la credencial del repositorio remoto viaja como opcion
+    de git, y el mensaje de error de un push fallido acaba en el log del
+    servicio, en el panel y en el correo de aviso. Un token que se filtra por
+    el mensaje de error de la operacion que lo usa es la forma clasica de
+    perderlo.
+    """
+    orden = ["git", "-C", str(repo), *previos, *args]
+    ambiente = {**os.environ, **(entorno or {})}
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args],
+        orden,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=ambiente,
     )
     if proc.returncode != 0 and not permitir_fallo:
-        raise ErrorAlmacen(
-            f"git {' '.join(args)} fallo ({proc.returncode}): "
-            f"{(proc.stderr or proc.stdout).strip()}"
-        )
+        # Los argumentos NO se vuelcan tal cual: entre ellos puede ir la
+        # cabecera de autorizacion. Se nombra el subcomando y ya.
+        detalle = (proc.stderr or proc.stdout).strip()
+        for secreto in tapar:
+            if secreto:
+                detalle = detalle.replace(secreto, "«oculto»")
+        raise ErrorAlmacen(f"git {args[0] if args else '?'} fallo "
+                           f"({proc.returncode}): {detalle}")
     return proc.stdout
 
 
@@ -455,19 +518,94 @@ class Almacen:
 
     # --- Replicacion --------------------------------------------------------
 
-    def replicar(self) -> str:
-        """Empuja al remoto configurado. Devuelve texto descriptivo."""
-        if not self.cfg.almacen.remoto:
-            return "sin remoto configurado"
+    def _credencial(self) -> tuple[list, list, dict]:
+        """(opciones -c, secretos a tapar, variables de entorno) para hablar con el remoto.
 
-        actual = _git(self.repo, "remote", "get-url", "origin", permitir_fallo=True).strip()
+        La credencial NO se mete en la URL ni se guarda en .git/config, que es
+        lo que hace todo el mundo y es justo lo que no hay que hacer aqui: el
+        repositorio se copia, se clona y se mira, y una URL con el token dentro
+        viaja en cada una de esas copias, ademas de salir en el log de cualquier
+        error de red. Va como cabecera en la linea de comandos de ESTA orden y
+        muere con ella.
+
+        Para SSH no hay token: manda la llave del sistema, y lo unico que se
+        hace es no dejar que git pare a preguntar nada. Un push que se queda
+        esperando una contrasena en un servicio desatendido no falla: se cuelga.
+        """
+        entorno = {
+            # Sin esto, un remoto que pide credenciales deja el proceso parado
+            # esperando a alguien que no hay. Con esto falla, que se puede ver.
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "",
+            "SSH_ASKPASS": "",
+        }
+        # Y esto apaga el ayudante de credenciales del sistema. Las variables de
+        # arriba tapan el aviso por terminal, pero NO un credential.helper puesto
+        # en el gitconfig de la maquina: ese abre su propia ventana (o consulta
+        # un llavero) y el proceso se queda esperando a nadie. En el Debian del
+        # despliegue no suele haber ninguno, o sea que esto no arregla nada hoy;
+        # esta para el dia que lo haya, porque el sintoma seria un servicio
+        # colgado sin una sola linea en el log.
+        siempre = ["-c", "credential.helper="]
+
+        token = self.cfg.almacen.remoto_token
+        if not token:
+            return siempre, [], entorno
+
+        usuario = self.cfg.almacen.remoto_usuario or "x-access-token"
+        basica = base64.b64encode(
+            f"{usuario}:{token}".encode("utf-8")
+        ).decode("ascii")
+        return (
+            [*siempre, "-c", f"http.extraheader=Authorization: Basic {basica}"],
+            (token, basica),
+            entorno,
+        )
+
+    def _rama(self) -> str:
+        pedida = (self.cfg.almacen.remoto_rama or "").strip()
+        if pedida:
+            return pedida
+        return _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+
+    def _apuntar_remoto(self) -> None:
+        actual = _git(self.repo, "remote", "get-url", "origin",
+                      permitir_fallo=True).strip()
         if not actual:
             _git(self.repo, "remote", "add", "origin", self.cfg.almacen.remoto)
         elif actual != self.cfg.almacen.remoto:
             _git(self.repo, "remote", "set-url", "origin", self.cfg.almacen.remoto)
 
-        rama = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
-        _git(self.repo, "push", "-q", "origin", rama)
+    def probar_remoto(self) -> str:
+        """Comprueba que se llega al remoto y que la credencial vale.
+
+        Es 'git ls-remote': pregunta que ramas hay y no escribe nada. Existe
+        porque la alternativa para saber si la configuracion esta bien es
+        esperar al proximo ciclo y mirar el log, y quien acaba de pegar un
+        token quiere saberlo AHORA. Lanza ErrorAlmacen con el motivo.
+        """
+        if not self.cfg.almacen.remoto:
+            raise ErrorAlmacen("no hay ninguna direccion de repositorio puesta")
+
+        previos, tapar, entorno = self._credencial()
+        salida = _git(self.repo, "ls-remote", "--heads", self.cfg.almacen.remoto,
+                      previos=previos, tapar=tapar, entorno=entorno)
+        ramas = [l.split("refs/heads/")[-1] for l in salida.splitlines() if l.strip()]
+        if not ramas:
+            return "se llega al repositorio, y esta vacio (el primer push lo llena)"
+        return f"se llega al repositorio. Ramas: {', '.join(sorted(ramas)[:8])}"
+
+    def replicar(self) -> str:
+        """Empuja al remoto configurado. Devuelve texto descriptivo."""
+        if not self.cfg.almacen.remoto:
+            return "sin remoto configurado"
+
+        self._apuntar_remoto()
+        rama = self._rama()
+        previos, tapar, entorno = self._credencial()
+        local = _git(self.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        _git(self.repo, "push", "-q", "origin", f"{local}:{rama}",
+             previos=previos, tapar=tapar, entorno=entorno)
         return f"replicado a {self.cfg.almacen.remoto} ({rama})"
 
     # --- Consulta -----------------------------------------------------------
@@ -475,3 +613,182 @@ class Almacen:
     def equipos_sin_respaldo(self, equipos: list[Equipo]) -> list[Equipo]:
         """Equipos del inventario que nunca se han respaldado con exito."""
         return [e for e in equipos if not (self.repo / e.ruta_relativa).is_file()]
+
+    def huerfanos(self, equipos: list[Equipo]) -> list[dict]:
+        """Respaldos que quedan en el repositorio de equipos ya dados de baja.
+
+        Dar de baja un equipo no borra sus respaldos, y esta bien que sea asi:
+        el dia que alguien pregunta como estaba configurado ese router antes de
+        retirarlo, la respuesta esta aqui. Pero un cliente que se va tiene
+        derecho a pedir que no quede nada suyo, y un equipo de pruebas que
+        nunca existio de verdad solo estorba. Esta lista es la unica forma de
+        ver que hay guardado de gente que ya no esta.
+
+        Se compara contra ruta_relativa y no contra el nombre: dos empresas
+        pueden tener un equipo homonimo, y mirar solo el nombre daria por vivo
+        el archivo del cliente que se fue porque otro cliente tiene un router
+        que se llama igual.
+
+        No lanza nunca: esto pinta una pantalla, y un repositorio recien creado
+        o a medio inicializar no puede dejar Ajustes sin abrir.
+        """
+        if not self.repo.is_dir():
+            return []
+
+        vivos = {
+            (e.ruta_relativa or "").replace("\\", "/") for e in equipos
+        }
+
+        sueltos = []
+        for archivo in sorted(self.repo.rglob("*.rsc")):
+            ruta = archivo.relative_to(self.repo).as_posix()
+            # Lo de dentro de .git son las tripas de git, no respaldos. No
+            # deberia haber ningun .rsc ahi, pero un repositorio se puede
+            # ensuciar de mil formas y ofrecer "borrar" un objeto interno seria
+            # ofrecer romper el repositorio.
+            if ruta.startswith(".git/") or ruta in vivos:
+                continue
+            if not _ruta_repo_valida(ruta):
+                continue
+
+            try:
+                cuenta = _git(self.repo, "rev-list", "--count", "HEAD", "--",
+                              ruta, permitir_fallo=True).strip()
+                ultimo = _git(self.repo, "log", "-1", "--format=%aI", "--",
+                              ruta, permitir_fallo=True).strip()
+            except OSError as exc:
+                log.warning("huerfanos: no se pudo consultar %s: %s", ruta, exc)
+                cuenta, ultimo = "", ""
+
+            carpeta = self.dir_binarios / PurePosixPath(_sin_extension(ruta))
+            binarios = len(list(carpeta.glob("*.backup"))) if carpeta.is_dir() else 0
+
+            sueltos.append({
+                "ruta": ruta,
+                "nombre": PurePosixPath(ruta).stem,
+                "empresa_carpeta": str(PurePosixPath(ruta).parent)
+                                   if str(PurePosixPath(ruta).parent) != "." else "",
+                "versiones": int(cuenta) if cuenta.isdigit() else 0,
+                "binarios": binarios,
+                "ultimo": ultimo,
+            })
+        return sueltos
+
+    def _borrar_binarios(self, ruta: str) -> None:
+        """Tira la carpeta de binarios del equipo. Best-effort, nunca lanza.
+
+        La carpeta se deriva de la ruta del .rsc igual que en guardar_binario:
+        mientras las dos salgan del mismo sitio, no puede quedarse aqui un
+        arbol que alli no exista. Y si se quedaran, serian .backup de un equipo
+        que ya no esta en ningun sitio: certificados y claves SSH de un cliente
+        que pidio que no quedara nada suyo.
+        """
+        carpeta = self.dir_binarios / PurePosixPath(_sin_extension(ruta))
+        if not carpeta.is_dir():
+            return
+        try:
+            shutil.rmtree(carpeta)
+        except OSError as exc:
+            log.warning("no se pudieron borrar los binarios de %s: %s", ruta, exc)
+
+    def retirar(self, ruta: str) -> bool:
+        """Saca el respaldo de un equipo del repositorio, dejando su historia.
+
+        Es un `git rm` y un commit: hoy el archivo ya no esta, pero todas sus
+        versiones anteriores siguen en git y se recuperan con un
+        `git checkout <commit>^ -- <ruta>`. Es la opcion por defecto justo por
+        eso: un borrado que se puede deshacer se puede pulsar sin miedo.
+
+        Devuelve False y deja un log en vez de lanzar, igual que renombrar:
+        quien llama es el panel, y esto no puede tumbar una peticion.
+        """
+        ruta = (ruta or "").strip().replace("\\", "/")
+        if not _ruta_repo_valida(ruta):
+            log.error("retirar: ruta no valida: %r", ruta)
+            return False
+        if not (self.repo / ruta).is_file():
+            log.error("retirar: no existe %s en el repositorio", ruta)
+            return False
+
+        # Mismo formato que guardar y renombrar: ruta real sin extension, con
+        # la empresa delante, para que un `git log --oneline` siga diciendo de
+        # que cliente es cada linea.
+        mensaje = f"Retirado: {_sin_extension(ruta)}"
+        try:
+            _git(self.repo, "rm", "-q", "--", ruta)
+            _git(self.repo, "commit", "-q", "-m", mensaje, "--", ruta)
+        except ErrorAlmacen as exc:
+            log.error("retirar: no se pudo quitar %s: %s", ruta, exc)
+            return False
+
+        log.info("Retirado del repositorio: %s", ruta)
+        self._borrar_binarios(ruta)
+        return True
+
+    def purgar(self, ruta: str) -> bool:
+        """Borra un respaldo de TODA la historia del repositorio. Irreversible.
+
+        Lo otro (retirar) deja las versiones anteriores dentro de git, que es
+        lo que casi siempre se quiere. Esto es para cuando lo que se pide es
+        que no quede nada: un cliente que se va, o un equipo cuyo export se
+        guardo con secretos que no debieron guardarse. Despues de esto no hay
+        commit del que sacarlo.
+
+        Reescribir la historia cambia el hash de todos los commits, asi que un
+        repositorio ya subido a un remoto queda divergido y el siguiente push
+        se rechaza. Es el precio de que el dato desaparezca de verdad.
+
+        Devuelve False y deja un log en vez de lanzar.
+        """
+        ruta = (ruta or "").strip().replace("\\", "/")
+        # CUIDADO: la ruta se interpola dentro de una cadena que git le pasa a
+        # un shell (--index-filter es un comando, no una lista de argumentos).
+        # Una comilla o un ';' ahi dentro serian una orden mas ejecutandose
+        # como el usuario del servicio, que en este despliegue es root. Por eso
+        # se valida ANTES -_ruta_repo_valida solo deja rutas relativas de una
+        # forma conocida- y ademas se pone entre comillas simples. Las dos
+        # cosas, no una: la validacion es la que de verdad cierra la puerta, y
+        # las comillas son el cinturon por si algun dia se afloja.
+        if not _ruta_repo_valida(ruta) or "'" in ruta:
+            log.error("purgar: ruta no valida: %r", ruta)
+            return False
+
+        filtro = f"git rm --cached --ignore-unmatch -- '{ruta}'"
+        try:
+            _git(
+                self.repo, "filter-branch", "--force",
+                "--index-filter", filtro, "--prune-empty", "--", "--all",
+                # filter-branch escupe un aviso de varias lineas recomendando
+                # filter-repo. Aqui no se puede usar: seria una dependencia mas
+                # que instalar en el servidor para un boton que se pulsa una vez
+                # al ano. Silenciarlo es lo que deja legible el log del panel.
+                entorno={"FILTER_BRANCH_SQUELCH_WARNING": "1"},
+            )
+        except ErrorAlmacen as exc:
+            log.error("purgar: no se pudo reescribir la historia de %s: %s",
+                      ruta, exc)
+            return False
+
+        # filter-branch guarda las referencias viejas en refs/original: mientras
+        # esten ahi, los commits de antes siguen siendo alcanzables y el archivo
+        # NO se ha borrado de nada. La receta de git usa xargs; aqui se hace en
+        # Python porque esto se prueba en Windows, donde no hay xargs.
+        try:
+            viejas = _git(self.repo, "for-each-ref", "--format=%(refname)",
+                          "refs/original", permitir_fallo=True)
+            for referencia in viejas.split():
+                _git(self.repo, "update-ref", "-d", referencia, permitir_fallo=True)
+            # Y el reflog es la otra copia: sin expirarlo, el objeto sigue vivo
+            # y `git gc` no lo toca.
+            _git(self.repo, "reflog", "expire", "--expire=now", "--all",
+                 permitir_fallo=True)
+            _git(self.repo, "gc", "--prune=now", "--aggressive",
+                 permitir_fallo=True)
+        except ErrorAlmacen as exc:
+            # La historia ya esta reescrita: el archivo no vuelve. Que quede un
+            # objeto suelto sin recoger es feo, no es el fallo.
+            log.warning("purgar: quedaron restos por recoger en %s: %s", ruta, exc)
+
+        log.info("Purgado de toda la historia: %s", ruta)
+        self._borrar_binarios(ruta)
+        return True

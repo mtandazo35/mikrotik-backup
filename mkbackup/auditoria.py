@@ -46,6 +46,7 @@ EVENTOS = {
     "equipo_alta": "Dio de alta un equipo",
     "equipo_cambio": "Edito un equipo",
     "equipo_baja": "Dio de baja un equipo",
+    "datos_borrados": "Borro los respaldos de un equipo",
     "importacion": "Importo equipos",
     "ajustes": "Cambio los ajustes",
     "acceso_ssh": "Cambio el acceso a los routers",
