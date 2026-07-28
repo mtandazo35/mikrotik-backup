@@ -59,6 +59,25 @@ class ErrorImagen(Exception):
     """La imagen no se puede procesar. Lleva un texto para ensenar tal cual."""
 
 
+class _Descomunal(ErrorImagen):
+    """La imagen declara mas pixeles de los que se aceptan descomprimir.
+
+    Es una subclase para poder dejarla pasar por el `except` que se traga todo
+    lo demas: ahi dentro hay decodificadores en C comiendo bytes de un
+    desconocido, y por eso se atrapa cualquier cosa; pero este error lo hemos
+    lanzado nosotros a proposito y no se puede confundir con "la imagen esta
+    danada", que es lo que se le diria a quien sube una foto normal.
+    """
+
+    def __init__(self, ancho: int, alto: int):
+        super().__init__(
+            f"Esa imagen son {ancho}x{alto} pixeles "
+            f"({ancho * alto // 1_000_000} megapixeles) al descomprimirla, y el "
+            f"tope son {MAXIMO_PIXELES // 1_000_000}. Si es una foto normal, "
+            "vuelve a exportarla; si no, no cabe en la memoria del servidor."
+        )
+
+
 def disponible() -> bool:
     """Si se puede ajustar el tamano. False = Pillow no esta instalada."""
     try:
@@ -74,9 +93,22 @@ def _abrir(datos: bytes):
     Image.MAX_IMAGE_PIXELS = MAXIMO_PIXELES
     try:
         img = Image.open(io.BytesIO(datos))
-        # load() es lo que descomprime de verdad; hasta aqui Pillow solo ha
-        # leido la cabecera, asi que una bomba no salta en open() sino aqui.
+
+        # El tope se comprueba AQUI, a mano, y no se deja en manos de
+        # MAX_IMAGE_PIXELS. Ese ajuste no es el tope que parece: Pillow solo
+        # AVISA al pasarlo y no se niega hasta el DOBLE. O sea que con el tope
+        # en 80 megapixeles, una imagen de 150 se decodificaba igual, y eso son
+        # 600 MB de memoria. El servidor donde corre esto tiene 1,9 GB y no
+        # tiene swap: no hay un error que recoger, hay un proceso que el
+        # sistema mata. Se comprueba antes de load(), que es lo unico que
+        # descomprime de verdad; hasta aqui solo se ha leido la cabecera.
+        ancho, alto = img.size
+        if ancho * alto > MAXIMO_PIXELES:
+            raise _Descomunal(ancho, alto)
+
         img.load()
+    except _Descomunal:
+        raise
     except Exception as exc:  # noqa: BLE001
         # Se traga cualquier cosa: los decodificadores de imagen son codigo C
         # comiendo bytes de un desconocido y lanzan de todo, no solo lo que

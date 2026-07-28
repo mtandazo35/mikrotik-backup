@@ -63,17 +63,27 @@ def _foto(ancho, alto, con_exif=False, modo="RGB"):
 
 
 def _bomba_png(lado=30000):
-    """PNG diminuto que declara una imagen enorme. Bomba de descompresion."""
+    """PNG diminuto que declara una imagen enorme. Bomba de descompresion.
+
+    El contenido de los pixeles NO se fabrica, y no es por ahorrar: fabricarlo
+    era construir 900 MB en memoria para probar que 900 MB no caben. En el
+    servidor de verdad (1,9 GB, sin swap) el sistema mataba el proceso de la
+    prueba, o sea que la unica comprobacion que vigila esto no llegaba a
+    ejecutarse justo en la maquina donde importa.
+    """
     def trozo(tipo, datos):
         return (len(datos).to_bytes(4, "big") + tipo + datos
                 + zlib.crc32(tipo + datos).to_bytes(4, "big"))
 
     cabecera = (lado.to_bytes(4, "big") + lado.to_bytes(4, "big")
                 + bytes([8, 0, 0, 0, 0]))          # 8 bits, escala de grises
-    # Una fila por linea, toda a cero: comprime a practicamente nada.
-    crudo = b"".join(b"\x00" + b"\x00" * lado for _ in range(lado))
+    # Lo que hace peligroso a este archivo es la CABECERA, que es lo unico que
+    # se lee para saber cuanta memoria hara falta. El rechazo tiene que pasar
+    # ahi, antes de descomprimir un solo pixel; si hiciera falta un IDAT de
+    # verdad para que saltara, ya seria tarde.
+    relleno = zlib.compress(b"\x00" * 128, 9)
     return (b"\x89PNG\r\n\x1a\n" + trozo(b"IHDR", cabecera)
-            + trozo(b"IDAT", zlib.compress(crudo, 9)) + trozo(b"IEND", b""))
+            + trozo(b"IDAT", relleno) + trozo(b"IEND", b""))
 
 
 def main() -> None:
@@ -145,17 +155,47 @@ def main() -> None:
 
     # --- 5. La bomba de descompresion --------------------------------------
     bomba = _bomba_png()
-    comprobar(f"la bomba de prueba pesa poco ({len(bomba) // 1024} KB) "
-              f"y declara 30000x30000", len(bomba) < 2 * 1024 * 1024)
+    comprobar(f"la bomba de prueba pesa poco ({len(bomba)} bytes) "
+              f"y declara 30000x30000", len(bomba) < 4096)
     try:
         im.ajustar(bomba)
         comprobar("una bomba de descompresion tiene que rechazarse", False)
     except im.ErrorImagen as exc:
-        comprobar("una bomba de descompresion se rechaza con un mensaje claro",
-                  "megapixeles" in str(exc) or "descomunal" in str(exc))
+        comprobar(f"una bomba de descompresion se rechaza con un mensaje claro "
+                  f"({str(exc)[:60]}...)",
+                  "megapixeles" in str(exc))
     except Exception as exc:  # noqa: BLE001
         comprobar(f"la bomba se rechaza SIN dejar escapar {type(exc).__name__}",
                   False)
+
+    # Y se rechaza JUSTO por encima del tope, no al doble. Pillow por su cuenta
+    # solo avisa en MAX_IMAGE_PIXELS y no se niega hasta el doble: con el tope
+    # en 80 megapixeles, una de 150 se decodificaba igual y eran 600 MB. En un
+    # servidor de 1,9 GB sin swap eso no es un error que recoger, es un proceso
+    # que el sistema mata.
+    justo_encima = int((im.MAXIMO_PIXELES + 1_000_000) ** 0.5)
+    try:
+        im.ajustar(_bomba_png(justo_encima))
+        comprobar(f"{justo_encima}x{justo_encima} pasa el tope y NO se acepta",
+                  False)
+    except im.ErrorImagen as exc:
+        comprobar(f"pasarse del tope basta para rechazarla, sin llegar al doble "
+                  f"({justo_encima}x{justo_encima})",
+                  "megapixeles" in str(exc))
+    except Exception as exc:  # noqa: BLE001
+        comprobar(f"al pasarse del tope no se escapa {type(exc).__name__}", False)
+
+    # Y justo por debajo NO se rechaza por tamano: un tope que se pasa de
+    # prudente rechaza fotos normales, y entonces se sube el tope y se pierde
+    # la proteccion entera.
+    justo_debajo = int((im.MAXIMO_PIXELES - 5_000_000) ** 0.5)
+    try:
+        im.ajustar(_bomba_png(justo_debajo))
+        comprobar("por debajo del tope no se rechaza por tamano", False)
+    except im.ErrorImagen as exc:
+        comprobar(f"por debajo del tope el rechazo NO es por megapixeles "
+                  f"({justo_debajo}x{justo_debajo})",
+                  "megapixeles" not in str(exc))
 
     comprobar("el tope de pixeles es alto para una camara real pero acotado",
               50_000_000 <= im.MAXIMO_PIXELES <= 200_000_000)
