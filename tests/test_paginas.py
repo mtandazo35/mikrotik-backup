@@ -28,6 +28,11 @@ from pathlib import Path
 
 from mkbackup import paginas as pg
 from mkbackup.config import Config
+from mkbackup.usuarios import AREAS, ETIQUETAS_PERMISO, PERMISOS
+
+
+def pg_etiquetas():
+    return dict(ETIQUETAS_PERMISO)
 
 FALLOS = []
 
@@ -125,12 +130,20 @@ def _consts_de_primer_nivel(js: str):
     return nombres
 
 
+# Los permisos salen de usuarios.PERMISOS y NO de una lista escrita aqui. Los
+# que habia ("equipos", "editar_equipos", "ajustes_editar") no existian en el
+# catalogo: no coincidian con nada, asi que estas paginas se estaban revisando
+# sin una sola pestana y sin un solo boton. Pasaban todas las comprobaciones
+# sobre un panel practicamente vacio, que es la peor forma de estar en verde.
+#
+# Al leerlos del catalogo, un permiso nuevo entra solo y uno retirado deja de
+# usarse sin que haya que acordarse de nada.
 SESION = {
     "nombre": "admin",
     "rol": "admin",
     "etiqueta": "Administrador",
-    "puede": {"equipos", "cambios", "usuarios", "auditoria", "ajustes",
-              "editar_equipos", "ajustes_editar"},
+    "puede": set(PERMISOS),
+    "todo": True,
 }
 
 
@@ -302,6 +315,35 @@ def main() -> None:
         importlib.reload(pg)
     comprobar(f"y la huella se calcula del contenido ({marca_ahora})",
               pg.MARCA_ESTILO == marca_ahora)
+
+    # --- Los permisos de la sesion de prueba son de verdad -----------------
+    # Si esta comprobacion falla, TODO lo de abajo se estaria revisando sobre
+    # un panel sin pestanas ni botones, y en verde. Ya paso.
+    comprobar(f"la sesion de prueba usa permisos del catalogo ({len(PERMISOS)})",
+              set(SESION["puede"]) <= set(PERMISOS) and len(SESION["puede"]) > 5)
+    nav = pg.panel(SESION, 3, "America/Guayaquil")
+    for ruta in ("/equipos", "/cambios", "/usuarios", "/auditoria", "/ajustes"):
+        comprobar(f"la navegacion ofrece {ruta}", f'href="{ruta}"' in nav)
+
+    # Y al reves: con un permiso solo, una sola pestana. Es lo que se pidio
+    # ("que solo vea la ventana de estado"), y es lo unico que distingue una
+    # navegacion que filtra de una que se pinta entera siempre.
+    solo_estado = {**SESION, "puede": {"estado.ver"}}
+    nav_corta = pg.panel(solo_estado, 3, "America/Guayaquil")
+    for ruta in ("/equipos", "/cambios", "/usuarios", "/auditoria", "/ajustes"):
+        comprobar(f"con solo estado.ver NO se ofrece {ruta}",
+                  f'href="{ruta}"' not in nav_corta)
+
+    # --- Las casillas de permisos salen agrupadas y completas --------------
+    formulario = pg.formulario_rol(
+        "operador", ["estado.ver"], list(PERMISOS), pg_etiquetas(), [], False,
+        sesion=SESION)
+    for titulo, _grupo in AREAS:
+        comprobar(f"el formulario de roles trae el area '{titulo}'",
+                  titulo in formulario)
+    faltan = [p for p in PERMISOS if f'value="{p}"' not in formulario]
+    comprobar(f"y una casilla por cada permiso (faltan: {faltan or 'ninguna'})",
+              not faltan)
 
     revisadas = paginas_a_revisar()
     comprobar(f"se pintan las paginas del panel ({len(revisadas)})",

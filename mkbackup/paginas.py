@@ -337,6 +337,20 @@ ESTILO = """
   .sin-datos { color: var(--suave); padding: .5rem 0; }
   .casillas { display: grid; gap: .3rem;
               grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+  /* Los permisos van en un bloque por area (los grupos salen de
+     usuarios.AREAS). Con dos docenas de casillas seguidas no se distingue lo
+     que se esta dando de lo que no; con el titulo de su area delante, si. El
+     titulo reusa el aspecto de los h2 del panel para que no parezca otra cosa. */
+  .area { margin-bottom: 1.1rem; }
+  .area:last-child { margin-bottom: 0; }
+  .area h3 { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--suave); margin: 0 0 .45rem; font-weight: 650;
+             border-bottom: 1px solid var(--borde); padding-bottom: .3rem; }
+  /* Lo que arrastra un permiso, pegado a SU casilla y no al pie del formulario:
+     hay que leerlo mientras se decide esa casilla, no despues de guardar. Va
+     sangrado hasta donde empieza el texto de la casilla para que se vea de
+     quien habla. */
+  .pista.arrastre { margin: -.05rem 0 .4rem 1.6rem; }
   .casilla { display: flex; align-items: center; gap: .55rem; font-size: .88rem;
              color: var(--texto); text-transform: none; letter-spacing: 0;
              margin: 0; padding: .25rem 0; cursor: pointer; }
@@ -756,13 +770,18 @@ HOJA = f'<link rel="stylesheet" href="{RUTA_ESTILO}">'
 # administrar (cuentas, registro, ajustes). Asi la parte que solo ve un
 # administrador queda junta en un extremo, en vez de partir en dos las
 # secciones de consulta.
+#
+# Cada pestana lleva SU permiso, uno por pantalla, y no uno grueso compartido
+# entre varias: asi una cuenta a la que solo se le dio 'estado.ver' entra y ve
+# unicamente Estado. En un panel de un ISP eso es lo normal, no la excepcion:
+# al cliente de Acme se le puede dejar la pantalla de Estado y nada mas.
 SECCIONES = (
-    ("/", "estado", "Estado", "ver"),
-    ("/equipos", "equipos", "Equipos", "ver"),
-    ("/cambios", "cambios", "Cambios", "ver"),
-    ("/usuarios", "usuarios", "Usuarios", "usuarios"),
-    ("/auditoria", "auditoria", "Auditoria", "usuarios"),
-    ("/ajustes", "ajustes", "Ajustes", "ajustes"),
+    ("/", "estado", "Estado", "estado.ver"),
+    ("/equipos", "equipos", "Equipos", "equipos.ver"),
+    ("/cambios", "cambios", "Cambios", "cambios.ver"),
+    ("/usuarios", "usuarios", "Usuarios", "usuarios.ver"),
+    ("/auditoria", "auditoria", "Auditoria", "auditoria.ver"),
+    ("/ajustes", "ajustes", "Ajustes", "ajustes.ver"),
 )
 
 
@@ -772,6 +791,21 @@ def _navegacion(activo: str, permisos) -> str:
         for ruta, clave, texto, permiso in SECCIONES
         if permiso in permisos
     )
+
+
+def puede(sesion, permiso: str) -> bool:
+    """Si esa sesion tiene ese permiso.
+
+    Se usa para decidir que botones se pintan. Ojo con lo que esto NO es:
+    esconder un boton no protege nada, porque quien conozca la direccion la
+    puede pedir igual y ahi es el servidor quien comprueba (web.py). Lo que se
+    gana es no ensenar acciones que contestan 403 al pulsarlas, que es tiempo
+    perdido y parece que el panel esta roto.
+
+    Una sesion sin 'puede' no tiene ningun permiso: si el dato no llega, la
+    respuesta segura es no pintar el boton.
+    """
+    return permiso in (sesion or {}).get("puede", ())
 
 
 def envoltura(
@@ -1386,6 +1420,15 @@ def equipos(
     hechos = hechos or {}
     visibles = columnas or list(COLUMNAS_EQUIPOS_DEFECTO)
 
+    # Dos cosas distintas tienen que dar permiso a la vez, y por eso se cruzan:
+    # `editable` es del servidor entero (web.editar_inventario) y apaga la
+    # edicion para todo el mundo; el permiso es de ESTA cuenta. Con el
+    # inventario en solo lectura no hay boton que valga aunque sobren permisos.
+    puede_crear = editable and puede(sesion, "equipos.crear")
+    puede_editar = editable and puede(sesion, "equipos.editar")
+    puede_baja = editable and puede(sesion, "equipos.baja")
+    puede_importar = editable and puede(sesion, "equipos.importar")
+
     def cabecera(clave, titulo, ordenable):
         if not ordenable:
             return f"<th>{esc(titulo)}</th>"
@@ -1456,13 +1499,16 @@ def equipos(
         }
 
         acciones = ""
-        if editable:
-            acciones = (
+        if puede_editar:
+            acciones += (
+                f'<a class="boton secundario mini" href="/equipos/editar?nombre={esc(e.nombre)}">Editar</a> '
+            )
+        if puede_baja:
+            acciones += (
                 # El nombre NO se mete dentro del confirm. Dentro de un
                 # atributo, el navegador decodifica las entidades ANTES de que
                 # el JavaScript lea la cadena, asi que un nombre con un
                 # apostrofe escapado volveria a serlo y cerraria la cadena.
-                f'<a class="boton secundario mini" href="/equipos/editar?nombre={esc(e.nombre)}">Editar</a> '
                 f'<form method="post" action="/equipos/baja" style="display:inline"'
                 f' onsubmit="return confirm(&#39;Dar de baja este equipo? '
                 f'Los respaldos ya guardados NO se borran.&#39;)">'
@@ -1477,18 +1523,32 @@ def equipos(
 
     if not filas:
         hay_filtro = any(filtro.get(k) for k in ("empresa", "grupo", "q"))
+        if hay_filtro:
+            nada = "Ningun equipo coincide con el filtro."
+        elif puede_crear or puede_importar:
+            nada = "El inventario esta vacio. Anade un equipo o importa una plantilla."
+        else:
+            # Sin permiso para llenarlo, decirle que anada uno es mandarlo a un
+            # boton que no tiene.
+            nada = "No hay ningun equipo que tu cuenta pueda ver."
         filas.append(
-            f'<tr><td colspan="{len(visibles) + 2}" class="vacio">'
-            + ("Ningun equipo coincide con el filtro."
-               if hay_filtro
-               else "El inventario esta vacio. Anade un equipo o importa una plantilla.")
-            + "</td></tr>"
+            f'<tr><td colspan="{len(visibles) + 2}" class="vacio">{nada}</td></tr>'
         )
 
-    if editable:
-        botones = ('<a class="boton" href="/equipos/nuevo">Anadir equipo</a>'
-                   '<a class="boton secundario" href="/importar">Importar desde Excel</a>')
-    else:
+    botones = ""
+    if puede_crear:
+        botones += '<a class="boton" href="/equipos/nuevo">Anadir equipo</a>'
+    if puede_importar:
+        botones += ('<a class="boton secundario" href="/importar">'
+                    "Importar desde Excel</a>")
+    # Lo de "modo solo lectura" solo se dice a quien tendria permiso para tocar
+    # el inventario: a esa persona le falta una explicacion de por que no hay
+    # botones. A quien solo puede mirar no le falta nada, y contarle como esta
+    # configurado el servidor es ruido que no le sirve para nada.
+    if not editable and any(
+        puede(sesion, p) for p in ("equipos.crear", "equipos.editar",
+                                   "equipos.baja", "equipos.importar")
+    ):
         botones = ('<span class="sub">El panel esta en modo solo lectura '
                    "(web.editar_inventario: false).</span>")
 
@@ -2128,9 +2188,15 @@ async function mirarSondeo() {
   }
 }
 
-pintarSondeo(INICIAL);
-if (INICIAL && !INICIAL.vacio && INICIAL.corriendo) {
-  latido = setInterval(mirarSondeo, CADA);
+// La tarjeta de los nombres solo se pinta si la cuenta tiene ese permiso, asi
+// que aqui puede no haber caja. Sin ella no hay nada que animar y el guion se
+// queda quieto, en vez de reventar en la consola y llevarse por delante
+// cualquier otro guion de la pagina.
+if (caja) {
+  pintarSondeo(INICIAL);
+  if (INICIAL && !INICIAL.vacio && INICIAL.corriendo) {
+    latido = setInterval(mirarSondeo, CADA);
+  }
 }
 """
 
@@ -2333,6 +2399,19 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
             equipos_sin_nombre: int = 0, replica=None, huerfanos=None) -> str:
     bloque_error = f'<div class="error">{esc(error)}</div>' if error else ""
     bloque_ok = f'<div class="bien">{esc(mensaje)}</div>' if mensaje else ""
+    replica_ahora = replica or {}
+
+    # Cada cuadro de esta pantalla va detras de SU permiso, y el que no se pueda
+    # usar no se pinta. Ensenar un formulario que contesta 403 al guardar es
+    # peor que no ensenarlo: quien lo rellena pierde el rato y se queda pensando
+    # que el panel falla, cuando lo que pasa es que no le toca. Esconderlo no
+    # protege nada -web.py vuelve a comprobar en cada POST-, solo evita el viaje.
+    hay_programador = puede(sesion, "ajustes.programador")
+    hay_respaldar = puede(sesion, "ajustes.respaldar")
+    # Preguntarle el nombre a los routers toca la FLOTA y no la configuracion
+    # del servidor: por eso su permiso es 'equipos.identidades' y no uno de
+    # ajustes, aunque el boton viva en esta pantalla.
+    hay_identidades = puede(sesion, "equipos.identidades")
 
     proxima = programador.get("proxima")
     ultima = programador.get("ultima")
@@ -2438,17 +2517,11 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
        marcha no se puede lanzar, porque ese ciclo tambien renombra.</p>
     <div id="sondeo" class="sondeo" hidden></div>"""
 
-    # El orden es el de uso, no el de importancia: lo que se toca a diario
-    # arriba (cada cuanto se respalda, con que se entra a los routers) y lo que
-    # se toca una vez al instalar mas abajo. El mosaico va rellenando de arriba
-    # abajo y salta de columna solo cuando no cabe, asi que ese orden se
-    # mantiene al leer.
-    cuerpo = f"""
-  {bloque_error}{bloque_ok}
-  <div class="mosaico">
-  <div class="tarjeta">
-    <h2>Cada cuanto se buscan cambios</h2>
-    {estado_prog}
+    # El titulo dice lo que de verdad se puede hacer en el cuadro: con solo el
+    # permiso de lanzar respaldos, ahi no se cambia ningun "cada cuanto".
+    titulo_prog = ("Cada cuanto se buscan cambios" if hay_programador
+                   else "Cuando toca el proximo respaldo")
+    form_programador = f"""
     <form method="post" action="/ajustes">
       <div class="campo">
         <label for="intervalo">Intervalo en minutos</label>
@@ -2466,19 +2539,37 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
              podria no respaldar nunca.</div>
       </div>
       <button type="submit">Guardar</button>
-    </form>
+    </form>""" if hay_programador else ""
 
-    <!-- En su propio formulario, y no como un segundo boton del de arriba:
-         pedir un respaldo no debe guardar de paso un intervalo que quiza se
-         estaba tecleando a medias, ni al reves. -->
+    # En su propio formulario, y no como un segundo boton del de arriba: pedir
+    # un respaldo no debe guardar de paso un intervalo que quiza se estaba
+    # tecleando a medias, ni al reves. Ahora ademas son permisos distintos.
+    form_respaldar = """
     <form method="post" action="/ajustes/respaldar" class="separado ahora">
       <button type="submit" class="secundario">Respaldar ahora</button>
       <span class="pista">Sin esperar al proximo ciclo. Lo arranca el
         programador en unos segundos y toca a la flota entera; el avance se ve
         en Estado.</span>
-    </form>
-  </div>
+    </form>""" if hay_respaldar else ""
 
+    # El orden es el de uso, no el de importancia: lo que se toca a diario
+    # arriba (cada cuanto se respalda, con que se entra a los routers) y lo que
+    # se toca una vez al instalar mas abajo. El mosaico va rellenando de arriba
+    # abajo y salta de columna solo cuando no cabe, asi que ese orden se
+    # mantiene al leer.
+    tarjetas = []
+
+    if hay_programador or hay_respaldar:
+        tarjetas.append(f"""
+  <div class="tarjeta">
+    <h2>{titulo_prog}</h2>
+    {estado_prog}
+    {form_programador}
+    {form_respaldar}
+  </div>""")
+
+    if puede(sesion, "ajustes.ssh"):
+        tarjetas.append(f"""
   <div class="tarjeta">
     <h2>Acceso general a los routers</h2>
     <p class="sub">Con esto se entra a cualquier equipo que no traiga usuario y
@@ -2501,32 +2592,62 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
       <button type="submit">Guardar el acceso</button>
       <p class="pista separado">{esc(nota_clave)}</p>
     </form>
-  </div>
+  </div>""")
 
+    if hay_identidades:
+        tarjetas.append(f"""
   <div class="tarjeta">
     <h2>Nombre de los routers</h2>
     {bloque_identidades}
-  </div>
+  </div>""")
 
+    if puede(sesion, "ajustes.remoto"):
+        tarjetas.append(f"""
   <div class="tarjeta">
     <h2>A donde se suben los respaldos</h2>
-    {_bloque_remoto(cfg, replica or {}, zona)}
-  </div>
+    {_bloque_remoto(cfg, replica_ahora, zona)}
+  </div>""")
 
+    if puede(sesion, "ajustes.fondo"):
+        tarjetas.append(f"""
   <div class="tarjeta">
     <h2>Pantalla de entrada</h2>
     {bloque_fondo}
-  </div>
-  </div>
+  </div>""")
 
-  <!-- Este a lo ancho y fuera del mosaico: lleva una tabla de cinco columnas
-       mas un formulario por fila, y a media pagina se queda con las columnas
-       apretadas y la barra de desplazamiento puesta. -->
+    mosaico = f'<div class="mosaico">{"".join(tarjetas)}</div>' if tarjetas else ""
+
+    # Este a lo ancho y fuera del mosaico: lleva una tabla de cinco columnas
+    # mas un formulario por fila, y a media pagina se queda con las columnas
+    # apretadas y la barra de desplazamiento puesta.
+    bloque_borrar = ""
+    if puede(sesion, "datos.borrar"):
+        bloque_borrar = f"""
   <div class="tarjeta">
     <h2>Borrar los datos de un equipo</h2>
     {_aviso_remoto_al_borrar(cfg)}
     {_bloque_datos(huerfanos or [], zona)}
-  </div>
+  </div>"""
+
+    # Con 'ajustes.ver' y nada mas, esta pantalla se abre pero no hay ningun
+    # formulario que rellenar. Se dice, en vez de dejar una pagina en blanco que
+    # parece un error del panel: lo que se ve abajo es informativo y basta con
+    # que alguien anada los permisos que falten.
+    if not tarjetas and not bloque_borrar:
+        nada_que_tocar = """
+  <div class="tarjeta">
+    <p class="sub">Tu cuenta puede abrir esta pantalla pero no cambiar nada de
+       aqui. Lo de abajo es solo para consultar; si necesitas tocar algo,
+       pideselo a quien reparte los permisos.</p>
+  </div>"""
+    else:
+        nada_que_tocar = ""
+
+    cuerpo = f"""
+  {bloque_error}{bloque_ok}
+  {nada_que_tocar}
+  {mosaico}
+  {bloque_borrar}
 
   <div class="tarjeta apagado">
     <h2>Lo que solo se cambia por archivo</h2>
@@ -2662,19 +2783,38 @@ def _resumen_alcance(u) -> str:
 
 def usuarios(lista, roles, permisos_por_usuario, yo: str, sesion=None,
              mensaje: str = "", zona=None) -> str:
-    """Cuentas y roles del panel."""
+    """Cuentas y roles del panel.
+
+    Ver esta pantalla y poder tocarla son cosas distintas: con 'usuarios.ver' se
+    entra y se lee quien hay, que rol tiene y hasta donde llega, y ahi se acaba.
+    Los botones de anadir, editar y borrar van cada uno con el suyo, asi que se
+    puede dejar una cuenta que solo revise, o una que de altas pero no borre.
+    """
+    hay_crear = puede(sesion, "usuarios.crear")
+    hay_editar = puede(sesion, "usuarios.editar")
+    hay_baja = puede(sesion, "usuarios.baja")
+    hay_rol_editar = puede(sesion, "roles.editar")
+    hay_rol_baja = puede(sesion, "roles.baja")
+
     filas = []
     for u in lista:
         soy_yo = u.nombre == yo
+        baja = ""
         if soy_yo:
             baja = '<span class="vacio">tu cuenta</span>'
-        else:
+        elif hay_baja:
             baja = (
                 '<form method="post" action="/usuarios/baja" style="display:inline"'
                 ' onsubmit="return confirm(&#39;Borrar esta cuenta? Se cerraran'
                 ' sus sesiones abiertas.&#39;)">'
                 f'<input type="hidden" name="nombre" value="{esc(u.nombre)}">'
                 '<button class="peligro mini" type="submit">Borrar</button></form>'
+            )
+        editar = ""
+        if hay_editar:
+            editar = (
+                f'<a class="boton secundario mini" '
+                f'href="/usuarios/editar?nombre={esc(u.nombre)}">Editar</a> '
             )
         cuantos = len(permisos_por_usuario.get(u.nombre, ()))
         filas.append(
@@ -2683,34 +2823,41 @@ def usuarios(lista, roles, permisos_por_usuario, yo: str, sesion=None,
             + f"</td><td>{esc(u.rol)}</td><td>{cuantos} permisos</td>"
             f"<td>{esc(_resumen_alcance(u))}</td>"
             f"<td>{esc(fecha(u.ultimo_acceso, zona) if u.ultimo_acceso else 'nunca')}</td>"
-            f'<td class="acciones">'
-            f'<a class="boton secundario mini" href="/usuarios/editar?nombre={esc(u.nombre)}">Editar</a> '
-            f"{baja}</td></tr>"
+            f'<td class="acciones">{editar}{baja}</td></tr>'
         )
 
     filas_rol = []
     for nombre in sorted(roles):
         usados = sum(1 for u in lista if u.rol == nombre)
         borrar = ""
-        if nombre != "admin" and not usados:
+        if hay_rol_baja and nombre != "admin" and not usados:
             borrar = (
                 '<form method="post" action="/usuarios/rol/baja" style="display:inline">'
                 f'<input type="hidden" name="rol" value="{esc(nombre)}">'
                 '<button class="peligro mini" type="submit">Borrar</button></form>'
             )
+        editar_rol = ""
+        if hay_rol_editar:
+            editar_rol = (
+                f'<a class="boton secundario mini" '
+                f'href="/usuarios/rol?rol={esc(nombre)}">Editar</a> '
+            )
         filas_rol.append(
             f"<tr><td>{esc(nombre)}</td><td>{len(roles[nombre])} permisos</td>"
             f"<td>{usados} cuentas</td>"
-            f'<td class="acciones">'
-            f'<a class="boton secundario mini" href="/usuarios/rol?rol={esc(nombre)}">Editar</a> '
-            f"{borrar}</td></tr>"
+            f'<td class="acciones">{editar_rol}{borrar}</td></tr>'
         )
+
+    botones = ""
+    if hay_crear:
+        botones += '<a class="boton" href="/usuarios/nuevo">Anadir usuario</a>'
+    if hay_rol_editar:
+        botones += '<a class="boton secundario" href="/usuarios/rol">Nuevo rol</a>'
 
     cuerpo = f"""
   {f'<div class="bien">{esc(mensaje)}</div>' if mensaje else ""}
   <div class="barra-acciones">
-    <a class="boton" href="/usuarios/nuevo">Anadir usuario</a>
-    <a class="boton secundario" href="/usuarios/rol">Nuevo rol</a>
+    {botones}
     <span class="sub crece">{len(lista)} cuentas</span>
   </div>
   <div class="tarjeta">
@@ -2739,16 +2886,70 @@ def usuarios(lista, roles, permisos_por_usuario, yo: str, sesion=None,
     return envoltura("mkbackup - usuarios", cuerpo, sesion, activo="usuarios")
 
 
+def _arrastre(clave: str, herencia, etiquetas) -> str:
+    """Que otros permisos se conceden solos al marcar este.
+
+    El texto se GENERA desde usuarios.HERENCIA y no se escribe a mano: una
+    lista paralela se separa del codigo en el primer cambio, y entonces la
+    pantalla explica una regla que ya no es la que se aplica.
+
+    Hace falta decirlo porque si no, alguien marca "Editar equipos", deja sin
+    marcar "Ver la lista de equipos" y guarda convencido de haber dado menos de
+    lo que dio. Peor aun al reves: si no se dijera, quitar la casilla de ver
+    pareceria quitar el acceso, y no lo quita.
+    """
+    otros = [c for c in herencia.get(clave, ()) if c != clave]
+    if not otros:
+        return ""
+    nombres = ", ".join(esc(etiquetas.get(c, c)) for c in otros)
+    return f'<div class="pista arrastre">Da tambien: {nombres}</div>'
+
+
 def _casillas(nombre_campo: str, opciones, marcadas, etiquetas) -> str:
-    """Lista de casillas. `opciones` son claves; `etiquetas` su texto."""
-    filas = []
-    for clave in opciones:
-        puesta = " checked" if clave in marcadas else ""
-        filas.append(
-            f'<label class="casilla"><input type="checkbox" name="{nombre_campo}"'
-            f' value="{esc(clave)}"{puesta}> {esc(etiquetas.get(clave, clave))}</label>'
-        )
-    return "".join(filas)
+    """Las casillas de permisos, en un bloque por area.
+
+    Agrupadas y no en una lista seguida porque son dos docenas: de corrido no
+    hay forma de ver que se esta dando y que no, y quien reparte permisos acaba
+    marcando de mas por no leerlas. Los grupos, su orden y el de los permisos
+    dentro de cada uno salen de usuarios.AREAS, que es donde estan definidos:
+    aqui no se repite ninguna lista, asi que un permiso nuevo aparece en su
+    sitio sin tocar esta pantalla.
+
+    `opciones` sigue mandando sobre lo que se pinta: lo que no venga en ella no
+    sale, y lo que venga y no este en ninguna area cae en un bloque final en vez
+    de desaparecer sin que nadie se entere.
+    """
+    from .usuarios import AREAS, HERENCIA
+
+    disponibles = list(opciones)
+    sueltas = [c for c in disponibles]
+    bloques = []
+
+    def bloque(titulo: str, claves) -> str:
+        filas = []
+        for clave in claves:
+            puesta = " checked" if clave in marcadas else ""
+            filas.append(
+                f'<div><label class="casilla"><input type="checkbox"'
+                f' name="{nombre_campo}" value="{esc(clave)}"{puesta}>'
+                f" {esc(etiquetas.get(clave, clave))}</label>"
+                f"{_arrastre(clave, HERENCIA, etiquetas)}</div>"
+            )
+        return (f'<div class="area"><h3>{esc(titulo)}</h3>'
+                f'<div class="casillas">{"".join(filas)}</div></div>')
+
+    for titulo, grupo in AREAS:
+        claves = [c for c, _ in grupo if c in disponibles]
+        if not claves:
+            continue
+        for c in claves:
+            if c in sueltas:
+                sueltas.remove(c)
+        bloques.append(bloque(titulo, claves))
+
+    if sueltas:
+        bloques.append(bloque("Otros", sueltas))
+    return "".join(bloques)
 
 
 def formulario_permisos(datos: dict, roles: dict, permisos, etiquetas_permiso,
@@ -2835,7 +3036,11 @@ def formulario_permisos(datos: dict, roles: dict, permisos, etiquetas_permiso,
       </div>
 
       <h2 class="aparte">Que puede hacer</h2>
-      <div class="casillas">{_casillas("permisos", permisos, marcados, etiquetas_permiso)}</div>
+      <p class="pista bajo-titulo">Un permiso por pantalla y por accion: se puede
+         dejar una cuenta que solo mire el Estado, o que vea las cuentas sin
+         poder tocarlas. Lo que marques aqui es lo de ESTA persona; el rol solo
+         es el punto de partida.</p>
+      {_casillas("permisos", permisos, marcados, etiquetas_permiso)}
 
       <h2 class="aparte">Sobre que equipos</h2>
       <label class="casilla destacada">
@@ -2908,9 +3113,12 @@ def formulario_rol(nombre: str, permisos_marcados, permisos, etiquetas_permiso,
         <label for="rol">Nombre del rol</label>
         {campo}
       </div>
-      <div class="casillas">
-        {_casillas("permisos", permisos, permisos_marcados, etiquetas_permiso)}
-      </div>
+      <h2 class="aparte">Que permite</h2>
+      <p class="pista bajo-titulo">Cada pantalla y cada accion van por separado:
+         un rol puede ver los equipos de su empresa sin poder editarlos, o
+         entrar a Usuarios solo a mirar. Debajo de una casilla se dice si
+         ademas arrastra otra.</p>
+      {_casillas("permisos", permisos, permisos_marcados, etiquetas_permiso)}
       <div class="barra-acciones separado">
         <button type="submit">Guardar</button>
         <a class="boton secundario" href="/usuarios">Cancelar</a>
@@ -2932,6 +3140,10 @@ def auditoria(eventos, usuarios_vistos, filtro: dict, sesion=None, zona=None,
     """
     from .auditoria import EVENTOS, SOSPECHOSOS
 
+    # Ver el registro y poder levantar un bloqueo son dos permisos: quien vigila
+    # los accesos no tiene por que ser quien decide que una IP vuelva a probar.
+    hay_desbloquear = puede(sesion, "auditoria.desbloquear")
+
     # --- Direcciones con intentos fallidos ---------------------------------
     filas_ip = []
     for f in vigiladas:
@@ -2941,16 +3153,27 @@ def auditoria(eventos, usuarios_vistos, filtro: dict, sesion=None, zona=None,
         else:
             estado = (f'<span class="etiqueta e-cambio">{esc(f["intentos"])} '
                       f"intentos</span>")
+        accion = ""
+        if hay_desbloquear:
+            accion = (
+                f'<form method="post" action="/auditoria/desbloquear" style="display:inline">'
+                f'<input type="hidden" name="ip" value="{esc(f["ip"])}">'
+                f'<button class="secundario mini" type="submit">Desbloquear</button>'
+                f"</form>"
+            )
         filas_ip.append(
             f'<tr><td><code>{esc(f["ip"])}</code></td><td>{estado}</td>'
-            f'<td class="acciones">'
-            f'<form method="post" action="/auditoria/desbloquear" style="display:inline">'
-            f'<input type="hidden" name="ip" value="{esc(f["ip"])}">'
-            f'<button class="secundario mini" type="submit">Desbloquear</button>'
-            f"</form></td></tr>"
+            f'<td class="acciones">{accion}</td></tr>'
         )
 
     if filas_ip:
+        # La frase de que hace el boton solo se dice si el boton esta: explicar
+        # una accion que no se ve solo hace buscarla por la pantalla.
+        que_hace = (
+            " Desbloquear borra su cuenta de intentos: es para cuando el "
+            "bloqueo fue un despiste, no un ataque."
+            if hay_desbloquear else ""
+        )
         bloque_ips = f"""
   <div class="tarjeta">
     <h2>Direcciones con intentos fallidos</h2>
@@ -2961,8 +3184,7 @@ def auditoria(eventos, usuarios_vistos, filtro: dict, sesion=None, zona=None,
       </table>
     </div>
     <p class="pista">Tras varios fallos seguidos, una direccion se bloquea
-       {bloqueo_minutos} minutos. Desbloquear borra su cuenta de intentos: es
-       para cuando el bloqueo fue un despiste, no un ataque. Esta lista vive en
+       {bloqueo_minutos} minutos.{que_hace} Esta lista vive en
        la memoria del panel, asi que reiniciarlo la vacia entera.</p>
   </div>"""
     else:

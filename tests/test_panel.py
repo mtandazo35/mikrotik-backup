@@ -117,9 +117,9 @@ class Panel:
         except Exception as exc:  # noqa: BLE001
             return 0, f"{type(exc).__name__}: {exc}"
 
-    def entrar(self) -> bool:
+    def entrar(self, usuario: str = "", clave: str = "") -> bool:
         datos = urllib.parse.urlencode(
-            {"usuario": self.cfg.web.usuario, "clave": self.CLAVE}
+            {"usuario": usuario or self.cfg.web.usuario, "clave": clave or self.CLAVE}
         ).encode()
         pet = urllib.request.Request(self.base + "/entrar", data=datos)
         try:
@@ -485,6 +485,72 @@ def main() -> None:
             comprobar("y cierra la conexion, para que esos bytes no los lea "
                       "la peticion siguiente",
                       b"connection: close" in cabeceras)
+
+            print("\n--- Una cuenta con permisos recortados ---")
+            # Hasta ahora TODO se probaba con el administrador, o sea que el
+            # modelo de permisos y el de alcance -que es lo que separa a un
+            # cliente de otro- no los tocaba ninguna prueba de punta a punta.
+            from mkbackup.usuarios import Alcance
+
+            CLAVE_2 = "clave-del-miron-9876"
+            errores = panel.ctx.usuarios.guardar_rol("solo-equipos", ["equipos.ver"])
+            comprobar(f"se crea un rol que solo ve equipos ({errores})", not errores)
+            errores = panel.ctx.usuarios.crear(
+                "miron", CLAVE_2, "solo-equipos",
+                alcance=Alcance(empresas={"Empresa Uno": "ver"}))
+            comprobar(f"y una cuenta con ese rol ({errores})", not errores)
+
+            galleta_admin = panel.cookie
+            comprobar("entra la cuenta recortada",
+                      panel.entrar("miron", CLAVE_2))
+
+            # Lo que se pidio: "que solo vea equipos". Al entrar NO puede caer
+            # en un 403: la pantalla de inicio es Estado y esta cuenta no la ve.
+            codigo, cuerpo = panel.pedir("/")
+            comprobar(f"al entrar no se come un 403 (dio {codigo})", codigo == 303)
+            comprobar("se le lleva a la pantalla que si puede abrir",
+                      "/equipos" in cuerpo or codigo == 303)
+
+            codigo, html = panel.pedir("/equipos")
+            comprobar(f"ve la lista de equipos (dio {codigo})", codigo == 200)
+            comprobar("y la navegacion no le ofrece lo que no puede usar",
+                      'href="/ajustes"' not in html
+                      and 'href="/usuarios"' not in html
+                      and 'href="/cambios"' not in html)
+
+            # Escribir la URL a mano no vale: esconder el boton no protege nada.
+            for ruta, que in (("/", "Estado"), ("/cambios", "Cambios"),
+                              ("/ajustes", "Ajustes"), ("/usuarios", "Usuarios"),
+                              ("/auditoria", "Auditoria")):
+                codigo, _ = panel.pedir(ruta)
+                comprobar(f"escribiendo /{que.lower()} a mano no entra "
+                          f"(dio {codigo})", codigo in (303, 403))
+
+            for ruta, datos in (
+                ("/equipos/nuevo", {**EQUIPO_MUDO, "nombre": "Colado",
+                                    "ip": "10.20.0.50"}),
+                ("/equipos/baja", {"nombre": "Equipo-Uno"}),
+                ("/ajustes", {"intervalo_minutos": "5"}),
+                ("/ajustes/remoto", {"remoto": "https://malo/x.git",
+                                     "remoto_cada": "1"}),
+                ("/usuarios/nuevo", {"nombre": "colado", "clave": "clave-larga-1",
+                                     "clave2": "clave-larga-1", "rol": "admin"}),
+                ("/usuarios/rol", {"nombre": "inventado", "permisos": "usuarios.ver"}),
+            ):
+                codigo, _ = panel.pedir(ruta, datos)
+                comprobar(f"POST {ruta} le responde que no (dio {codigo})",
+                          codigo == 403)
+
+            comprobar("y no dio de alta nada",
+                      "Colado" not in Path(panel.cfg.inventario).read_text(
+                          encoding="utf-8"))
+            comprobar("ni borro el equipo que si veia",
+                      "Equipo-Uno" in Path(panel.cfg.inventario).read_text(
+                          encoding="utf-8"))
+            comprobar("ni se creo la cuenta",
+                      panel.ctx.usuarios.obtener("colado") is None)
+
+            panel.cookie = galleta_admin
 
             print("\n--- Y lo que no existe no tumba nada ---")
             for ruta in ("/no-existe", "/equipos/../../etc/passwd", "/equipos/"):

@@ -4,23 +4,33 @@ El panel gestiona routers de varias empresas cliente de un ISP, asi que aqui se
 comprueban dos cosas distintas y que no se pueden confundir:
 
   - QUE puede hacer una cuenta: permisos efectivos = (rol | mas) - menos, con
-    `menos` ganando siempre y los permisos desconocidos ignorados
+    `menos` ganando siempre, los permisos desconocidos ignorados y la HERENCIA
+    aplicada al final (quien puede editar equipos ve la lista de equipos)
   - SOBRE QUE equipos: el alcance (todo / por empresa / por equipo suelto)
 
 Y ademas:
 
+  - el catalogo de permisos es coherente consigo mismo: sale de AREAS, no tiene
+    repetidos, todos tienen etiqueta y las tablas que lo acompanan (HERENCIA,
+    EQUIVALENCIAS, ROLES_INICIALES) solo nombran permisos que existen. Un typo
+    ahi concede o niega algo que nadie comprueba
   - los roles son datos: se crean, se editan y se borran, pero no se borra uno
     en uso ni se borra 'admin'
   - LA INVARIANTE: nunca puede quedarse el sistema sin ningun usuario que tenga
-    a la vez el permiso 'usuarios' y alcance a todas las empresas. Ese es el
-    unico que puede volver a repartirlo todo, y se protege por sus cuatro
-    caminos directos (borrar, cambiar rol, quitar permiso, recortar alcance) y
-    por los dos indirectos (editar o borrar el rol que lo sostiene)
+    a la vez TODAS las llaves ('usuarios.ver' y 'usuarios.editar') y alcance a
+    todas las empresas. Ese es el unico que puede volver a repartirlo todo, y se
+    protege por sus cuatro caminos directos (borrar, cambiar rol, quitar permiso,
+    recortar alcance) y por los dos indirectos (editar o borrar el rol que lo
+    sostiene)
   - las contrasenas no se guardan en claro y la vieja deja de valer al cambiarla
   - un archivo corrupto no autentica a nadie ni se sobreescribe en silencio
   - la cuenta de config.yaml se migra sola y solo una vez
-  - un archivo de formato 1 se migra a formato 2 sin perder nada y sin cambiarle
-    los permisos a nadie por sorpresa
+  - un archivo de formato 1 se migra sin perder nada y sin cambiarle los
+    permisos a nadie por sorpresa
+  - LA MIGRACION DE FORMATO 2 A 3 (permisos gruesos -> finos) no le quita nada a
+    nadie ni le devuelve a nadie lo que le habian quitado, y sobre todo deja el
+    panel con un administrador total. Si eso falla, la actualizacion cierra el
+    panel con llave y la unica salida es editar el JSON por SSH
   - dos procesos (el programador y el panel) ven los mismos usuarios
 
 No levanta el servidor ni toca la red.
@@ -46,6 +56,19 @@ FALLOS = []
 # lo caro que sale el hash (de eso se ocupa test_sesion), asi que basta 1000.
 ITER = 1000
 
+# En que se parte cada permiso grueso del formato 2. Estan escritos A MANO y no
+# sacados de usr.EQUIVALENCIAS a proposito: son el contrato de la migracion, o
+# sea "lo que cada cuenta podia hacer antes". Si se leyeran de la tabla que se
+# esta probando, cualquier cambio en ella se daria por bueno solo, y justo eso
+# es lo que deja a alguien fuera de su panel sin que nadie se entere.
+VER_FINO = {"estado.ver", "equipos.ver", "cambios.ver"}
+AJUSTES_FINO = {"ajustes.ver", "ajustes.programador", "ajustes.respaldar",
+                "ajustes.ssh", "ajustes.remoto", "ajustes.fondo",
+                "equipos.identidades", "datos.borrar"}
+USUARIOS_FINO = {"usuarios.ver", "usuarios.crear", "usuarios.editar",
+                 "usuarios.baja", "roles.editar", "roles.baja",
+                 "auditoria.ver", "auditoria.desbloquear"}
+
 
 def comprobar(descripcion: str, condicion: bool) -> None:
     print(f"[{'OK  ' if condicion else 'FALLA'}] {descripcion}")
@@ -59,6 +82,29 @@ def nuevo(carpeta: Path, nombre: str = "usuarios.json", iteraciones: int = ITER)
     if ruta.exists():
         ruta.unlink()
     return usr.Usuarios(ruta, iteraciones=iteraciones), ruta
+
+
+def es_total(almacen, cuenta) -> bool:
+    """Si esa cuenta es un ADMINISTRADOR TOTAL: alcance a todo + las dos llaves.
+
+    Se calcula aqui desde fuera, con `permisos()` y `alcance.todo`, en vez de
+    llamar al `_es_total` del modulo: lo que hay que comprobar es que la
+    invariante se cumple de verdad para quien usa el panel, no que una funcion
+    privada este de acuerdo consigo misma.
+
+    Acepta el nombre o la propia cuenta, que es como se lee mejor en cada sitio.
+    """
+    if isinstance(cuenta, str):
+        cuenta = almacen.obtener(cuenta)
+    if cuenta is None:
+        return False
+    tiene = almacen.permisos(cuenta)
+    return cuenta.alcance.todo and all(llave in tiene for llave in usr.LLAVES)
+
+
+def hay_total(almacen) -> bool:
+    """Si queda alguien capaz de volver a repartirlo todo."""
+    return any(es_total(almacen, x) for x in almacen.listar())
 
 
 def main() -> None:
@@ -78,6 +124,98 @@ def main() -> None:
 
 
 def pruebas(carpeta: Path) -> None:
+    # 0. Coherencia del catalogo de permisos. No toca disco: son las tablas del
+    #    modulo mirandose entre ellas. Va lo primero porque todo lo demas da por
+    #    hecho que estan bien, y un typo aqui no revienta nada: simplemente
+    #    concede o niega en silencio algo que no existe, y eso no se ve hasta
+    #    que alguien se queda sin poder entrar a una pantalla.
+    desde_areas = [clave for _, grupo in usr.AREAS for clave, _ in grupo]
+    comprobar(f"PERMISOS sale de AREAS y en el mismo orden ({len(usr.PERMISOS)} "
+              "permisos)",
+              list(usr.PERMISOS) == desde_areas)
+    repetidos = sorted({p for p in usr.PERMISOS if desde_areas.count(p) > 1})
+    comprobar(f"y no hay ninguno repetido (repetidos: {repetidos})",
+              not repetidos)
+    comprobar("cada area tiene nombre y al menos un permiso",
+              all(nombre and grupo for nombre, grupo in usr.AREAS))
+
+    sin_etiqueta = sorted(p for p in usr.PERMISOS
+                          if not usr.ETIQUETAS_PERMISO.get(p))
+    comprobar(f"todo permiso tiene etiqueta para la web (sin etiqueta: "
+              f"{sin_etiqueta})",
+              not sin_etiqueta)
+    sobran = sorted(set(usr.ETIQUETAS_PERMISO) - set(usr.PERMISOS))
+    comprobar(f"y no hay etiquetas de permisos que ya no existen (sobran: "
+              f"{sobran})",
+              not sobran)
+
+    # HERENCIA: un typo aqui arrastra (o deja de arrastrar) un permiso que
+    # nadie comprueba, y el sintoma es un 403 en una pantalla que se acaba de
+    # habilitar. Se miran claves Y valores.
+    claves_malas = sorted(k for k in usr.HERENCIA if k not in usr.PERMISOS)
+    comprobar(f"HERENCIA solo arranca de permisos que existen (malas: "
+              f"{claves_malas})",
+              not claves_malas)
+    valores_malos = sorted({v for valores in usr.HERENCIA.values()
+                            for v in valores if v not in usr.PERMISOS})
+    comprobar(f"y solo arrastra permisos que existen (malos: {valores_malos})",
+              not valores_malos)
+    comprobar("ningun permiso se arrastra a si mismo",
+              all(k not in valores for k, valores in usr.HERENCIA.items()))
+    # _permisos_de recorre la herencia UNA sola vez, asi que nada de lo que se
+    # arrastra puede arrastrar a su vez otra cosa: si algun dia pasa, el segundo
+    # salto se perderia en silencio.
+    en_cadena = sorted({v for valores in usr.HERENCIA.values()
+                        for v in valores if v in usr.HERENCIA})
+    comprobar(f"y lo arrastrado no arrastra nada mas: una sola pasada basta "
+              f"(en cadena: {en_cadena})",
+              not en_cadena)
+
+    # EQUIVALENCIAS: la tabla de la migracion. Sus claves son los permisos
+    # VIEJOS, que ya no existen; sus valores, los nuevos, que si.
+    comprobar("EQUIVALENCIAS traduce los tres permisos gruesos de antes",
+              sorted(usr.EQUIVALENCIAS) == ["ajustes", "usuarios", "ver"])
+    destinos_malos = sorted({v for valores in usr.EQUIVALENCIAS.values()
+                             for v in valores if v not in usr.PERMISOS})
+    comprobar(f"todo destino de EQUIVALENCIAS es un permiso valido (malos: "
+              f"{destinos_malos})",
+              not destinos_malos)
+    viejos_vivos = sorted(k for k in usr.EQUIVALENCIAS if k in usr.PERMISOS)
+    comprobar(f"y ninguna clave vieja sigue en PERMISOS (siguen: "
+              f"{viejos_vivos})",
+              not viejos_vivos)
+    comprobar("y traduce a lo que este archivo dice que hacia cada uno",
+              {k: set(v) for k, v in usr.EQUIVALENCIAS.items()}
+              == {"ver": VER_FINO, "ajustes": AJUSTES_FINO,
+                  "usuarios": USUARIOS_FINO})
+
+    # _traducir se llama al migrar (una vez) y al calcular permisos efectivos
+    # (en cada peticion, sobre datos ya traducidos): tiene que dar igual.
+    for muestra in (list(usr.EQUIVALENCIAS), list(usr.PERMISOS),
+                    ["ver", "estado.ver", "ajustes", "diferencias"], []):
+        una = usr._traducir(muestra)
+        comprobar(f"_traducir es idempotente sobre {muestra[:3]}...",
+                  usr._traducir(una) == una)
+    comprobar("y lo que no conoce lo deja pasar tal cual",
+              usr._traducir(["telepatia"]) == {"telepatia"})
+
+    # Los roles de fabrica: si alguno nombrara un permiso que no existe, una
+    # instalacion nueva arrancaria con un rol que no da lo que dice dar.
+    malos_iniciales = sorted({p for permisos in usr.ROLES_INICIALES.values()
+                              for p in permisos if p not in usr.PERMISOS})
+    comprobar(f"los roles iniciales solo usan permisos validos (malos: "
+              f"{malos_iniciales})",
+              not malos_iniciales)
+    comprobar("el rol 'admin' inicial da TODOS los permisos",
+              set(usr.ROLES_INICIALES[usr.ROL_ADMIN]) == set(usr.PERMISOS))
+    comprobar(f"y por tanto cumple la invariante: trae las llaves "
+              f"{list(usr.LLAVES)}",
+              all(llave in usr.ROLES_INICIALES[usr.ROL_ADMIN]
+                  for llave in usr.LLAVES))
+    comprobar("las llaves son permisos de verdad, y LLAVE es una de ellas",
+              all(llave in usr.PERMISOS for llave in usr.LLAVES)
+              and usr.LLAVE in usr.LLAVES)
+
     # 1. Archivo que todavia no existe: no es un error, es que no hay cuentas.
     u, ruta = nuevo(carpeta)
     comprobar("sin archivo, listar devuelve vacio", u.listar() == [])
@@ -121,7 +259,7 @@ def pruebas(carpeta: Path) -> None:
               u.obtener("fantasma") is None)
     prestada = u.obtener("admin")
     prestada.rol = "lector"
-    prestada.permisos_menos.append("usuarios")
+    prestada.permisos_menos.append("usuarios.editar")
     prestada.alcance.todo = False
     prestada.alcance.empresas["Acme"] = usr.VER
     devuelta = u.obtener("admin")
@@ -304,14 +442,16 @@ def pruebas(carpeta: Path) -> None:
     comprobar("el rol solo: operador tiene lo suyo",
               perm.permisos(perm.obtener("tecnico"))
               == set(usr.ROLES_INICIALES["operador"]))
-    comprobar("el rol solo: lector solo ve",
-              perm.permisos(perm.obtener("cliente")) == {"ver"})
+    comprobar(f"el rol solo: lector solo mira ({sorted(VER_FINO)})",
+              perm.permisos(perm.obtener("cliente")) == VER_FINO)
 
     # Con 'mas': la excepcion de "este de aqui tambien importa el Excel".
+    # 'equipos.importar' arrastra 'equipos.ver' por HERENCIA, que el lector ya
+    # tiene: la suma se ve limpia.
     comprobar("permisos_mas suma sobre el rol",
               perm.actualizar("cliente", permisos_mas=["equipos.importar"]) == []
               and perm.permisos(perm.obtener("cliente"))
-              == {"ver", "equipos.importar"})
+              == VER_FINO | {"equipos.importar"})
     comprobar("y puede() lo ve",
               perm.puede(perm.obtener("cliente"), "equipos.importar"))
 
@@ -326,11 +466,17 @@ def pruebas(carpeta: Path) -> None:
 
     # El conflicto: en 'mas' y en 'menos' a la vez. Gana 'menos', porque quitar
     # es la operacion segura.
+    # Se usa 'ajustes.respaldar' porque ademas arrastra 'ajustes.ver' por
+    # HERENCIA: si el conflicto se resolviera mal, no solo aparaceria el permiso
+    # concedido sino tambien la puerta a la pantalla de Ajustes.
     comprobar("un permiso en mas y en menos a la vez NO se concede",
               perm.actualizar("cliente",
-                              permisos_mas=["ajustes", "diferencias"],
-                              permisos_menos=["ajustes"]) == []
-              and perm.permisos(perm.obtener("cliente")) == {"ver", "diferencias"})
+                              permisos_mas=["ajustes.respaldar", "diferencias"],
+                              permisos_menos=["ajustes.respaldar"]) == []
+              and perm.permisos(perm.obtener("cliente"))
+              == VER_FINO | {"diferencias"})
+    comprobar("y lo que ese permiso habria arrastrado tampoco se cuela",
+              "ajustes.ver" not in perm.permisos(perm.obtener("cliente")))
     comprobar("quitar gana tambien sobre lo que daba el rol y lo repetia mas",
               perm.actualizar("tecnico",
                               permisos_mas=["equipos.crear"],
@@ -345,11 +491,17 @@ def pruebas(carpeta: Path) -> None:
         if fila["nombre"] == "cliente":
             fila["permisos_mas"] = ["diferencias", "telepatia"]
             fila["permisos_menos"] = ["adivinar"]
+    # El rol se deja con el permiso GRUESO 'ver', que es el caso real del rato
+    # que va entre actualizar el codigo y reescribir el JSON: ahi los permisos
+    # viejos siguen en el archivo y nadie puede quedarse fuera por eso.
     datos["roles"]["lector"] = ["ver", "permiso-retirado"]
     ruta_perm.write_text(json.dumps(datos), encoding="utf-8")
     os.utime(ruta_perm, (time.time() + 1, time.time() + 1))
     comprobar("un permiso desconocido en el archivo no revienta ni cuenta",
-              perm.permisos(perm.obtener("cliente")) == {"ver", "diferencias"})
+              perm.permisos(perm.obtener("cliente")) == VER_FINO | {"diferencias"})
+    comprobar("y un permiso grueso guardado en el rol se traduce al vuelo, sin "
+              "esperar a que se reescriba el archivo",
+              VER_FINO <= perm.permisos(perm.obtener("cliente")))
     comprobar("y la cuenta sigue entrando con normalidad",
               perm.autenticar("cliente", "clave-larga-1") is not None)
     comprobar("un permiso retirado en el rol tampoco cuenta",
@@ -366,6 +518,49 @@ def pruebas(carpeta: Path) -> None:
     comprobar("cada permiso del contrato tiene su etiqueta para la web",
               all(p in usr.ETIQUETAS_PERMISO and usr.ETIQUETAS_PERMISO[p]
                   for p in usr.PERMISOS))
+
+    # 12b. HERENCIA: quien puede hacer algo tiene que poder ver la pantalla
+    #      donde se hace. Existe porque la alternativa ("puede editar equipos
+    #      pero no ve la lista de equipos") no se lee como una restriccion
+    #      estricta, se lee como que el panel esta roto: la persona marca la
+    #      casilla, guarda, y el panel le contesta 403 en la pantalla que ella
+    #      misma acaba de habilitar.
+    her, _ = nuevo(carpeta, "herencia.json")
+    her.crear("jefe", "clave-larga-1", "admin")
+
+    comprobar("un rol con solo 'equipos.editar' arrastra 'equipos.ver'",
+              her.guardar_rol("editores", ["equipos.editar"]) == []
+              and her.crear("editor", "clave-larga-1", "editores") == []
+              and her.permisos(her.obtener("editor"))
+              == {"equipos.editar", "equipos.ver"})
+    comprobar("y la herencia NO va al reves: ver no da editar",
+              her.guardar_rol("mirones", ["equipos.ver"]) == []
+              and her.crear("miron", "clave-larga-1", "mirones") == []
+              and her.permisos(her.obtener("miron")) == {"equipos.ver"})
+
+    # La herencia se aplica DESPUES de permisos_menos, y es a proposito: dejar
+    # que una excepcion arranque la pantalla de debajo devolveria exactamente el
+    # 403 que la herencia existe para evitar. Quien quiera que no edite, que le
+    # quite 'equipos.editar'.
+    comprobar("quitar 'equipos.ver' con permisos_menos NO se lo quita a quien "
+              "puede editar equipos",
+              her.actualizar("editor", permisos_menos=["equipos.ver"]) == []
+              and "equipos.ver" in her.permisos(her.obtener("editor")))
+    comprobar("y la forma buena de quitarselo si funciona: quitar el editar",
+              her.actualizar("editor", permisos_menos=["equipos.editar"]) == []
+              and her.permisos(her.obtener("editor")) == set())
+    comprobar("a quien NO puede editar, permisos_menos si le quita el ver",
+              her.actualizar("miron", permisos_menos=["equipos.ver"]) == []
+              and her.permisos(her.obtener("miron")) == set())
+
+    # La herencia tambien llega desde permisos_mas, no solo desde el rol: es el
+    # mismo caso de "este de aqui ademas lanza respaldos" y tiene que poder
+    # abrir la pantalla de Ajustes para hacerlo.
+    comprobar("un permiso dado por excepcion tambien arrastra su pantalla",
+              her.actualizar("miron", permisos_menos=[],
+                             permisos_mas=["ajustes.respaldar"]) == []
+              and her.permisos(her.obtener("miron"))
+              == {"equipos.ver", "ajustes.respaldar", "ajustes.ver"})
 
     # 13. Alcance: sobre que equipos actua cada cuenta.
     todo = usr.Alcance(todo=True)
@@ -450,26 +645,33 @@ def pruebas(carpeta: Path) -> None:
               sorted(rol.roles()) == ["admin", "lector", "operador"])
 
     comprobar("crear un rol nuevo no da errores",
-              rol.guardar_rol("facturacion", ["ver", "diferencias"]) == [])
+              rol.guardar_rol("facturacion", ["estado.ver", "diferencias"]) == [])
     comprobar("y aparece con sus permisos",
-              rol.roles().get("facturacion") == ["ver", "diferencias"])
+              rol.roles().get("facturacion") == ["estado.ver", "diferencias"])
     comprobar("editar un rol lo reemplaza entero",
-              rol.guardar_rol("facturacion", ["ver"]) == []
-              and rol.roles().get("facturacion") == ["ver"])
+              rol.guardar_rol("facturacion", ["estado.ver"]) == []
+              and rol.roles().get("facturacion") == ["estado.ver"])
     comprobar("el nombre del rol se guarda en minusculas",
-              rol.guardar_rol("Soporte", ["ver"]) == []
+              rol.guardar_rol("Soporte", ["estado.ver"]) == []
               and "soporte" in rol.roles() and "Soporte" not in rol.roles())
 
     comprobar("un rol con un permiso inventado se rechaza",
-              rol.guardar_rol("chapuza", ["ver", "volar"]) != []
+              rol.guardar_rol("chapuza", ["estado.ver", "volar"]) != []
               and "chapuza" not in rol.roles())
+    # Un permiso GRUESO del formato viejo tampoco se acepta en un formulario:
+    # al leer el archivo se traduce para no dejar a nadie fuera, pero aqui hay
+    # alguien delante que puede marcar la casilla correcta.
+    comprobar("y un permiso del modelo viejo tampoco se guarda a mano",
+              rol.guardar_rol("antigua", ["ver"]) != []
+              and rol.guardar_rol("antigua", ["ajustes"]) != []
+              and "antigua" not in rol.roles())
     for malo in ["", " ", "x", "y" * 33, "con espacios", "acentuadó", "rol@casa"]:
         comprobar(f"nombre de rol invalido: {malo!r}",
-                  rol.guardar_rol(malo, ["ver"]) != [])
+                  rol.guardar_rol(malo, ["estado.ver"]) != [])
 
     comprobar("el rol nuevo se puede asignar",
               rol.crear("contable", "clave-larga-1", "facturacion") == []
-              and rol.permisos(rol.obtener("contable")) == {"ver"})
+              and rol.permisos(rol.obtener("contable")) == {"estado.ver"})
 
     comprobar("un rol en uso no se puede borrar",
               rol.borrar_rol("facturacion") != [])
@@ -490,9 +692,10 @@ def pruebas(carpeta: Path) -> None:
     comprobar("los roles sobreviven al proceso",
               usr.Usuarios(rol.ruta, iteraciones=ITER).roles() == rol.roles())
 
-    # 15. LA INVARIANTE: nunca sin un usuario con 'usuarios' + alcance a todo.
-    #     Es lo que sustituye al viejo "no te quedes sin admin": con roles
-    #     editables, el nombre del rol ya no garantiza nada.
+    # 15. LA INVARIANTE: nunca sin un usuario con TODAS las llaves
+    #     ('usuarios.ver' + 'usuarios.editar') y alcance a todo. Es lo que
+    #     sustituye al viejo "no te quedes sin admin": con roles editables, el
+    #     nombre del rol ya no garantiza nada.
     solo, _ = nuevo(carpeta, "solo-admin.json")
     solo.crear("jefe", "clave-larga-1", "admin")            # el unico total
     solo.crear("tecnico", "clave-larga-1", "operador")
@@ -501,11 +704,13 @@ def pruebas(carpeta: Path) -> None:
     solo.crear("admin.acme", "clave-larga-1", "admin",
                alcance=usr.Alcance(empresas={"Acme": usr.EDITAR}))
 
-    comprobar("el unico administrador total es el que tiene las dos cosas",
-              solo.puede(solo.obtener("jefe"), "usuarios")
-              and solo.obtener("jefe").alcance.todo
-              and solo.puede(solo.obtener("admin.acme"), "usuarios")
-              and not solo.obtener("admin.acme").alcance.todo)
+    comprobar(f"el unico administrador total es el que tiene las dos cosas: las "
+              f"llaves {list(usr.LLAVES)} y el alcance a todo",
+              es_total(solo, "jefe")
+              and all(solo.puede(solo.obtener("admin.acme"), llave)
+                      for llave in usr.LLAVES)
+              and not solo.obtener("admin.acme").alcance.todo
+              and not es_total(solo, "admin.acme"))
 
     def explica(errores):
         texto = " ".join(errores).lower()
@@ -528,10 +733,31 @@ def pruebas(carpeta: Path) -> None:
 
     # Camino 3: quitarle el permiso con permisos_menos (el rol sigue siendo
     # admin, pero la excepcion se lo quita: mismo resultado, mas silencioso).
-    errores = solo.actualizar("jefe", permisos_menos=["usuarios"])
-    comprobar("no se le puede quitar 'usuarios' con permisos_menos", errores != [])
+    errores = solo.actualizar("jefe", permisos_menos=list(usr.LLAVES))
+    comprobar("no se le pueden quitar las llaves con permisos_menos", errores != [])
     comprobar("y se explica", explica(errores))
-    comprobar("el permiso sigue ahi", solo.puede(solo.obtener("jefe"), "usuarios"))
+    comprobar("los permisos siguen ahi",
+              all(solo.puede(solo.obtener("jefe"), llave) for llave in usr.LLAVES))
+
+    # Con permisos finos hay una via nueva y mas silenciosa que antes: quitar
+    # SOLO 'usuarios.editar' deja intacto 'usuarios.ver', asi que la cuenta
+    # sigue viendo la pantalla de cuentas y parece que manda, pero ya no puede
+    # devolverle el acceso a nadie. Eso rompe la invariante igual.
+    errores = solo.actualizar("jefe", permisos_menos=["usuarios.editar"])
+    comprobar("quitar SOLO 'usuarios.editar' ya rompe la invariante, aunque "
+              "quede 'usuarios.ver'", errores != [])
+    comprobar("y tambien se explica", explica(errores))
+    comprobar("sigue pudiendo editar cuentas",
+              solo.puede(solo.obtener("jefe"), "usuarios.editar"))
+
+    # Al reves NO rompe, y es deliberado: 'usuarios.editar' arrastra
+    # 'usuarios.ver' por HERENCIA, asi que la pantalla se le devuelve sola y la
+    # cuenta sigue pudiendo repartir. Quitarla no la deja fuera de nada.
+    comprobar("quitar solo 'usuarios.ver' NO rompe: la herencia de "
+              "'usuarios.editar' se lo devuelve",
+              solo.actualizar("jefe", permisos_menos=["usuarios.ver"]) == []
+              and es_total(solo, "jefe"))
+
     comprobar("quitarle OTRO permiso si se puede",
               solo.actualizar("jefe", permisos_menos=["equipos.importar"]) == []
               and not solo.puede(solo.obtener("jefe"), "equipos.importar"))
@@ -547,15 +773,20 @@ def pruebas(carpeta: Path) -> None:
     comprobar("ampliarle el alcance (que ya es todo) no molesta",
               solo.actualizar("jefe", alcance=usr.Alcance(todo=True)) == [])
 
-    # Camino 5 (indirecto): quitarle 'usuarios' AL ROL que se lo daba.
-    sin_usuarios = [p for p in usr.PERMISOS if p != "usuarios"]
-    errores = solo.guardar_rol("admin", sin_usuarios)
-    comprobar("no se le puede quitar 'usuarios' al rol que sostiene al ultimo",
+    # Camino 5 (indirecto): quitarle las llaves AL ROL que se las daba.
+    sin_llaves = [p for p in usr.PERMISOS if p not in usr.LLAVES]
+    errores = solo.guardar_rol("admin", sin_llaves)
+    comprobar("no se le pueden quitar las llaves al rol que sostiene al ultimo",
               errores != [])
     comprobar("y se explica", explica(errores))
-    comprobar("el rol admin sigue dando 'usuarios'",
-              "usuarios" in solo.roles()["admin"])
-    comprobar("editar el rol sin tocar 'usuarios' si se puede",
+    # Y basta con quitar una: sin 'usuarios.editar' el rol ya no reparte nada,
+    # por mucho que siga dejando mirar la pantalla de cuentas.
+    comprobar("quitarle al rol SOLO 'usuarios.editar' tambien se bloquea",
+              solo.guardar_rol("admin", [p for p in usr.PERMISOS
+                                         if p != "usuarios.editar"]) != [])
+    comprobar("el rol admin sigue dando las dos llaves",
+              all(llave in solo.roles()["admin"] for llave in usr.LLAVES))
+    comprobar("editar el rol sin tocar las llaves si se puede",
               solo.guardar_rol("admin", [p for p in usr.PERMISOS
                                          if p != "equipos.importar"]) == []
               and solo.guardar_rol("admin", list(usr.PERMISOS)) == [])
@@ -581,21 +812,27 @@ def pruebas(carpeta: Path) -> None:
     comprobar("pero a la que queda sola no se la puede tocar",
               solo.cambiar_rol("jefa", "lector") != []
               and solo.borrar("jefa") != []
-              and solo.actualizar("jefa", permisos_menos=["usuarios"]) != []
+              and solo.actualizar("jefa", permisos_menos=["usuarios.editar"]) != []
               and solo.actualizar("jefa", alcance=usr.Alcance()) != [])
-    comprobar("siempre queda al menos un administrador total",
-              any(solo.puede(x, "usuarios") and x.alcance.todo
-                  for x in solo.listar()))
+    comprobar("siempre queda al menos un administrador total", hay_total(solo))
 
     # El camino indirecto con un rol PROPIO, que es como pasara de verdad:
     # alguien se hace su rol 'jefatura' y luego lo edita sin pensar.
     comprobar("se puede montar la invariante sobre un rol propio",
-              solo.guardar_rol("jefatura", ["ver", "usuarios"]) == []
+              solo.guardar_rol("jefatura",
+                               ["estado.ver"] + list(usr.LLAVES)) == []
               and solo.actualizar("jefa", rol="jefatura") == []
-              and solo.puede(solo.obtener("jefa"), "usuarios"))
+              and es_total(solo, "jefa"))
     comprobar("y entonces ese rol propio queda igual de protegido",
-              solo.guardar_rol("jefatura", ["ver"]) != []
+              solo.guardar_rol("jefatura", ["estado.ver"]) != []
               and solo.borrar_rol("jefatura") != [])
+    # El rol propio se monto con las dos llaves justas: quitarle solo una lo
+    # deja igual de inservible para repartir, y tambien se bloquea.
+    comprobar("ni quitandole una sola llave al rol propio",
+              solo.guardar_rol("jefatura",
+                               ["estado.ver", "usuarios.ver"]) != []
+              and solo.guardar_rol("jefatura",
+                                   ["estado.ver", "usuarios.editar"]) == [])
     comprobar("el 'admin' de reserva sigue sin poder borrarse",
               solo.borrar_rol("admin") != [])
 
@@ -611,7 +848,7 @@ def pruebas(carpeta: Path) -> None:
     comprobar("y con alcance a todo: era la unica cuenta y lo veia todo",
               sembrado.alcance.todo)
     comprobar("asi que sostiene la invariante desde el primer arranque",
-              semilla.puede(sembrado, "usuarios") and sembrado.alcance.todo)
+              es_total(semilla, sembrado))
     comprobar("el hash del YAML se copio tal cual, sin volver a hashearlo",
               sembrado.clave_hash == hash_yaml)
     comprobar("y por eso la clave de siempre sigue entrando",
@@ -646,7 +883,7 @@ def pruebas(carpeta: Path) -> None:
 
     hash_bueno = ses.hashear("clave-larga-1", iteraciones=ITER)
 
-    # 17. Migracion de formato 1 a formato 2, al leer y sin perder nada.
+    # 17. Migracion de formato 1 al actual, al leer y sin perder nada.
     ruta_v1 = carpeta / "formato1.json"
     ruta_v1.write_text(
         json.dumps({
@@ -683,15 +920,16 @@ def pruebas(carpeta: Path) -> None:
     escrito = json.loads(ruta_v1.read_text(encoding="utf-8"))
     comprobar("el archivo queda escrito en el formato nuevo",
               escrito.get("formato") == usr.FORMATO)
+    # Los permisos de cada rol quedan ordenados al migrar (pasan por _traducir,
+    # que devuelve un conjunto), asi que se comparan por conjunto y no por lista.
     comprobar("y los tres roles de siempre pasan a ser datos",
-              escrito.get("roles") == {k: list(v)
-                                       for k, v in usr.ROLES_INICIALES.items()})
+              {k: sorted(v) for k, v in escrito.get("roles", {}).items()}
+              == {k: sorted(v) for k, v in usr.ROLES_INICIALES.items()})
     comprobar("los permisos efectivos son los de antes de migrar",
               viejo.permisos(migrados["tecnico"])
               == set(usr.ROLES_INICIALES["operador"]))
     comprobar("y el admin migrado sostiene la invariante",
-              viejo.puede(migrados["jefe"], "usuarios")
-              and migrados["jefe"].alcance.todo)
+              es_total(viejo, migrados["jefe"]))
 
     # Idempotente: volver a leerlo (otro proceso, o el mismo) no lo vuelve a
     # tocar. Se compara el texto entero, no solo el formato.
@@ -705,12 +943,149 @@ def pruebas(carpeta: Path) -> None:
               ruta_v1.read_text(encoding="utf-8") == texto_tras_migrar
               and ruta_v1.stat().st_mtime_ns == marca_tras_migrar)
 
-    # Un archivo que YA es formato 2 no se toca, y sus roles propios se
-    # respetan (no se pisan con ROLES_INICIALES).
+    # 17b. LA MIGRACION PELIGROSA: formato 2 (permisos gruesos) a formato 3
+    #      (permisos finos). Es el cambio que puede dejar a alguien fuera de su
+    #      propio panel al actualizar, porque un permiso desconocido se IGNORA:
+    #      sin traduccion, 'ver', 'ajustes' y 'usuarios' dejarian de valer y
+    #      todo el mundo se quedaria sin nada, empezando por quien administra.
+    #      Se escribe el archivo de formato 2 a mano, tal como quedo en disco
+    #      antes de actualizar, y se lee con Usuarios.
     ruta_v2 = carpeta / "formato2.json"
-    contenido_v2 = json.dumps({
-        "formato": 2,
-        "roles": {"admin": list(usr.PERMISOS), "facturacion": ["ver"]},
+    ruta_v2.write_text(
+        json.dumps({
+            "formato": 2,
+            "roles": {
+                "admin": ["ver", "diferencias", "equipos.crear",
+                          "equipos.editar", "equipos.baja", "equipos.importar",
+                          "ajustes", "usuarios"],
+                "operador": ["ver", "equipos.editar"],
+                "lector": ["ver"],
+            },
+            "usuarios": [
+                # El administrador del ISP: lo ve todo y es quien reparte.
+                {"nombre": "jefe", "rol": "admin", "clave_hash": hash_bueno,
+                 "creado": "2025-02-01T09:00:00+00:00",
+                 "ultimo_acceso": "2026-07-20T07:00:00+00:00",
+                 "permisos_mas": [], "permisos_menos": [],
+                 "alcance": {"todo": True, "empresas": {}, "equipos": {}}},
+                # Un administrador de UNA empresa al que alguien, a proposito,
+                # le cerro la pantalla de Ajustes.
+                {"nombre": "acme.jefe", "rol": "admin", "clave_hash": hash_bueno,
+                 "creado": "", "ultimo_acceso": "",
+                 "permisos_mas": [], "permisos_menos": ["ajustes"],
+                 "alcance": {"todo": False, "empresas": {"Acme S.A.": "editar"},
+                             "equipos": {}}},
+                # Un lector pelado: el caso de "y esta cuenta no tiene que ganar
+                # nada con la actualizacion".
+                {"nombre": "acme.lector", "rol": "lector",
+                 "clave_hash": hash_bueno, "creado": "", "ultimo_acceso": "",
+                 "permisos_mas": [], "permisos_menos": [],
+                 "alcance": {"todo": False, "empresas": {"Acme S.A.": "ver"},
+                             "equipos": {}}},
+                # Y un lector al que alguien le dio Ajustes por excepcion.
+                {"nombre": "acme.tecnico", "rol": "lector",
+                 "clave_hash": hash_bueno, "creado": "", "ultimo_acceso": "",
+                 "permisos_mas": ["ajustes"], "permisos_menos": [],
+                 "alcance": {"todo": False, "empresas": {"Acme S.A.": "ver"},
+                             "equipos": {}}},
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+    mig = usr.Usuarios(ruta_v2, iteraciones=ITER)
+    tras = {x.nombre: x for x in mig.listar()}
+    comprobar("la migracion a permisos finos no pierde ninguna cuenta",
+              sorted(tras) == ["acme.jefe", "acme.lector", "acme.tecnico", "jefe"])
+    comprobar("ni las fechas ni el alcance de cada una",
+              tras["jefe"].creado == "2025-02-01T09:00:00+00:00"
+              and tras["jefe"].ultimo_acceso == "2026-07-20T07:00:00+00:00"
+              and tras["acme.jefe"].alcance.puede_editar("acme s.a.", "core-01")
+              and not tras["acme.jefe"].alcance.todo)
+
+    # Lo que hay que conservar: el admin podia hacerlo TODO, y despues tambien.
+    permisos_jefe = mig.permisos(tras["jefe"])
+    comprobar(f"el admin migrado conserva los {len(usr.PERMISOS)} permisos "
+              f"(tiene {len(permisos_jefe)})",
+              permisos_jefe == set(usr.PERMISOS))
+
+    # LA comprobacion que de verdad importa: sin traducir 'usuarios' el panel
+    # se queda sin nadie que pueda repartir, y solo se reabre editando el JSON
+    # por SSH. Que la cuenta exista no basta: tiene que tener las llaves.
+    comprobar("SIGUE HABIENDO UN ADMINISTRADOR TOTAL despues de migrar",
+              hay_total(mig) and es_total(mig, tras["jefe"]))
+
+    # Y lo que hay que NO regalar: el lector sigue siendo un lector.
+    permisos_lector = mig.permisos(tras["acme.lector"])
+    comprobar(f"el lector migrado se queda exactamente en {sorted(VER_FINO)}",
+              permisos_lector == VER_FINO)
+
+    # Los 'menos' se traducen igual que los 'mas'. Si solo se tradujeran los
+    # 'mas', a esta cuenta el rol admin le daria los ocho permisos de Ajustes y
+    # su 'permisos_menos: ["ajustes"]' dejaria de quitar nada: se le devolveria
+    # en silencio un acceso que alguien le retiro a proposito.
+    permisos_acme = mig.permisos(tras["acme.jefe"])
+    comprobar("una cuenta con permisos_menos ['ajustes'] NO entra a Ajustes "
+              "despues de migrar",
+              "ajustes.ver" not in permisos_acme)
+    comprobar("y no le queda NINGUNO de los permisos de Ajustes",
+              not (AJUSTES_FINO & permisos_acme))
+    comprobar("pero conserva todo lo demas que le daba su rol",
+              {"equipos.crear", "equipos.baja", "diferencias"} <= permisos_acme
+              and USUARIOS_FINO <= permisos_acme)
+
+    # Los 'mas' tambien: quien tenia Ajustes por excepcion sigue teniendolo.
+    permisos_tec = mig.permisos(tras["acme.tecnico"])
+    comprobar("una cuenta con permisos_mas ['ajustes'] SI entra a Ajustes "
+              "despues de migrar",
+              AJUSTES_FINO <= permisos_tec)
+    comprobar("y no gana de propina nada de las otras areas",
+              permisos_tec == VER_FINO | AJUSTES_FINO)
+
+    # Los roles tambien se traducen, y son los que sostienen todo lo anterior.
+    roles_migrados = mig.roles()
+    comprobar("el rol 'admin' viejo se convierte en los 24 permisos finos",
+              set(roles_migrados["admin"]) == set(usr.PERMISOS))
+    comprobar(f"el rol 'lector' viejo se queda en {sorted(VER_FINO)}",
+              set(roles_migrados["lector"]) == VER_FINO)
+    comprobar("y el 'operador' viejo conserva lo justo que tenia",
+              set(roles_migrados["operador"]) == VER_FINO | {"equipos.editar"})
+
+    escrito_v2 = json.loads(ruta_v2.read_text(encoding="utf-8"))
+    comprobar(f"el archivo queda escrito con formato {usr.FORMATO}",
+              escrito_v2.get("formato") == usr.FORMATO)
+    comprobar("y en disco ya no queda ni un permiso grueso",
+              not (set(usr.EQUIVALENCIAS)
+                   & {p for lista in escrito_v2["roles"].values() for p in lista})
+              and not (set(usr.EQUIVALENCIAS)
+                       & {p for fila in escrito_v2["usuarios"]
+                          for p in fila["permisos_mas"] + fila["permisos_menos"]}))
+    comprobar("los permisos_menos guardados son ya los ocho finos de Ajustes",
+              {fila["nombre"]: set(fila["permisos_menos"])
+               for fila in escrito_v2["usuarios"]}["acme.jefe"] == AJUSTES_FINO)
+    comprobar("las claves de siempre siguen entrando tras la migracion",
+              mig.autenticar("acme.jefe", "clave-larga-1") is not None)
+
+    # Idempotencia: releer no vuelve a migrar. Se compara el texto entero y la
+    # marca del archivo, porque una migracion que se repita cada lectura
+    # reescribiria el archivo en cada peticion del panel.
+    texto_v3 = ruta_v2.read_text(encoding="utf-8")
+    marca_v3 = ruta_v2.stat().st_mtime_ns
+    releido = usr.Usuarios(ruta_v2, iteraciones=ITER)
+    releido.listar()
+    releido.roles()
+    comprobar("releer el archivo migrado no lo vuelve a tocar",
+              ruta_v2.read_text(encoding="utf-8") == texto_v3
+              and ruta_v2.stat().st_mtime_ns == marca_v3)
+    comprobar("y desde otro proceso los permisos salen identicos",
+              releido.permisos(releido.obtener("acme.jefe")) == permisos_acme
+              and releido.permisos(releido.obtener("jefe")) == permisos_jefe)
+
+    # Un archivo que YA es del formato actual no se toca, y sus roles propios se
+    # respetan (no se pisan con ROLES_INICIALES).
+    ruta_v3 = carpeta / "formato3.json"
+    contenido_v3 = json.dumps({
+        "formato": usr.FORMATO,
+        "roles": {"admin": list(usr.PERMISOS), "facturacion": ["estado.ver"]},
         "usuarios": [
             {"nombre": "jefe", "rol": "admin", "clave_hash": hash_bueno,
              "creado": "", "ultimo_acceso": "",
@@ -723,18 +1098,20 @@ def pruebas(carpeta: Path) -> None:
                          "equipos": {}}},
         ],
     }, indent=2)
-    ruta_v2.write_text(contenido_v2, encoding="utf-8")
-    nuevo_formato = usr.Usuarios(ruta_v2, iteraciones=ITER)
-    comprobar("un archivo ya en formato 2 se lee tal cual",
+    ruta_v3.write_text(contenido_v3, encoding="utf-8")
+    nuevo_formato = usr.Usuarios(ruta_v3, iteraciones=ITER)
+    comprobar(f"un archivo ya en formato {usr.FORMATO} se lee tal cual",
               sorted(x.nombre for x in nuevo_formato.listar())
               == ["contable", "jefe"])
     comprobar("y no se reescribe al leerlo",
-              ruta_v2.read_text(encoding="utf-8") == contenido_v2)
+              ruta_v3.read_text(encoding="utf-8") == contenido_v3)
     comprobar("sus roles propios se respetan",
-              nuevo_formato.roles().get("facturacion") == ["ver"])
+              nuevo_formato.roles().get("facturacion") == ["estado.ver"])
+    # 'diferencias' arrastra 'cambios.ver' por HERENCIA: el rol da estado.ver, la
+    # excepcion da diferencias y la herencia anade la pantalla donde se usa.
     comprobar("y las excepciones y el alcance se leen enteros",
               nuevo_formato.permisos(nuevo_formato.obtener("contable"))
-              == {"ver", "diferencias"}
+              == {"estado.ver", "diferencias", "cambios.ver"}
               and nuevo_formato.obtener("contable").alcance
               .puede_ver("acme s.a.", "core-01"))
 
@@ -754,7 +1131,7 @@ def pruebas(carpeta: Path) -> None:
         ("cambiar_rol", lambda: roto.cambiar_rol("jefe", "lector")),
         ("actualizar", lambda: roto.actualizar("jefe", rol="lector")),
         ("borrar", lambda: roto.borrar("jefe")),
-        ("guardar_rol", lambda: roto.guardar_rol("nuevo", ["ver"])),
+        ("guardar_rol", lambda: roto.guardar_rol("nuevo", ["estado.ver"])),
         ("borrar_rol", lambda: roto.borrar_rol("lector")),
         ("sembrar", lambda: roto.sembrar("jefe", hash_yaml)),
     ]:
@@ -783,7 +1160,7 @@ def pruebas(carpeta: Path) -> None:
     # perder una cuenta es malo, dejar fuera a las otras es peor.
     ruta_rota.write_text(
         json.dumps({
-            "formato": 2,
+            "formato": usr.FORMATO,
             "roles": {"admin": list(usr.PERMISOS)},
             "usuarios": [
                 {"nombre": "bueno", "rol": "admin", "clave_hash": hash_bueno,
@@ -806,7 +1183,7 @@ def pruebas(carpeta: Path) -> None:
     # 'administrador' a mano, el fallo tiene que ser NEGAR.
     ruta_rota.write_text(
         json.dumps({
-            "formato": 2,
+            "formato": usr.FORMATO,
             "roles": {"admin": list(usr.PERMISOS)},
             "usuarios": [
                 {"nombre": "raro", "rol": "administrador",
@@ -849,7 +1226,7 @@ def pruebas(carpeta: Path) -> None:
     comprobar("y el cambio de alcance",
               b.obtener("tecnico").alcance.puede_editar("Acme", "core-01"))
 
-    a.guardar_rol("facturacion", ["ver"])
+    a.guardar_rol("facturacion", ["estado.ver"])
     comprobar("un rol nuevo se ve desde el otro proceso",
               "facturacion" in b.roles())
 

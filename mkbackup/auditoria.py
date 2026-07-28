@@ -51,6 +51,14 @@ EVENTOS = {
     "ajustes": "Cambio los ajustes",
     "acceso_ssh": "Cambio el acceso a los routers",
     "respaldo_manual": "Pidio un respaldo inmediato",
+    "identidades": "Le pregunto el nombre a los routers",
+    "remoto": "Cambio a donde se suben los respaldos",
+    "remoto_prueba": "Probo la conexion con el repositorio",
+    # Entro bien pero su cuenta no tiene ni un permiso de ver. Se registra
+    # porque no es un intento de colarse -es alguien a quien se le creo la
+    # cuenta y se olvido darle acceso-, y en el registro se distingue solo si
+    # tiene su propia etiqueta.
+    "sin_pantallas": "Entro sin permiso para ver nada",
 }
 
 # Eventos que conviene mirar aunque no haya pasado nada mas: son los que

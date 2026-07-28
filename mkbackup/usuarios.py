@@ -106,26 +106,107 @@ log = logging.getLogger("mkbackup.usuarios")
 # Version del formato del archivo.
 #   1 -> tres roles fijos en el codigo, sin alcance ni excepciones.
 #   2 -> roles como datos, permisos_mas/permisos_menos y alcance por usuario.
-# La migracion de 1 a 2 es automatica al leer (ver _leer).
-FORMATO = 2
+#   3 -> permisos finos: 'ver', 'ajustes' y 'usuarios' se parten en uno por
+#        pantalla y por accion (ver PERMISOS y HERENCIA).
+# Las migraciones son automaticas al leer (ver _leer y _migrar).
+FORMATO = 3
 
-# Todo lo que se puede permitir o negar. Es una lista CERRADA a proposito: el
-# panel comprueba permisos por nombre, y un permiso que solo exista en el
-# archivo de un cliente no lo comprobaria nadie.
-PERMISOS = ("ver", "diferencias", "equipos.crear", "equipos.editar",
-            "equipos.baja", "equipos.importar", "ajustes", "usuarios")
+# Todo lo que se puede permitir o negar, por AREAS. Es una lista CERRADA a
+# proposito: el panel comprueba permisos por nombre, y un permiso que solo
+# exista en el archivo de un cliente no lo comprobaria nadie.
+#
+# Estan agrupados porque asi se pintan en la pantalla de roles, y porque una
+# lista plana de treinta casillas no se entiende. El orden manda tambien en la
+# interfaz: primero mirar, luego tocar la flota, luego la configuracion y al
+# final las cuentas, que es de menos a mas peligroso.
+AREAS = (
+    ("Consultar", (
+        ("estado.ver", "Ver la pantalla de Estado"),
+        ("equipos.ver", "Ver la lista de equipos"),
+        ("cambios.ver", "Ver la lista de cambios"),
+        ("diferencias", "Ver el contenido de los cambios (diffs)"),
+    )),
+    ("La flota", (
+        ("equipos.crear", "Anadir equipos"),
+        ("equipos.editar", "Editar equipos"),
+        ("equipos.baja", "Dar de baja equipos"),
+        ("equipos.importar", "Importar desde Excel"),
+        ("equipos.identidades", "Preguntarle el nombre a los routers"),
+    )),
+    ("Ajustes", (
+        ("ajustes.ver", "Abrir la pantalla de Ajustes"),
+        ("ajustes.programador", "Cambiar cada cuanto se respalda"),
+        ("ajustes.respaldar", "Lanzar un respaldo ahora"),
+        ("ajustes.ssh", "Cambiar el acceso SSH a los routers"),
+        ("ajustes.remoto", "Cambiar a donde se suben los respaldos"),
+        ("ajustes.fondo", "Cambiar la imagen de la pantalla de entrada"),
+        ("datos.borrar", "BORRAR los respaldos de un equipo"),
+    )),
+    ("Cuentas y registro", (
+        ("usuarios.ver", "Ver las cuentas y los roles"),
+        ("usuarios.crear", "Anadir cuentas"),
+        ("usuarios.editar", "Editar cuentas (rol, permisos y alcance)"),
+        ("usuarios.baja", "Borrar cuentas"),
+        ("roles.editar", "Crear y editar roles"),
+        ("roles.baja", "Borrar roles"),
+        ("auditoria.ver", "Ver el registro de auditoria"),
+        ("auditoria.desbloquear", "Desbloquear direcciones IP"),
+    )),
+)
+
+PERMISOS = tuple(clave for _, grupo in AREAS for clave, _ in grupo)
 
 # Como se explica cada permiso en la web. Vive aqui y no en las plantillas para
 # que el texto visible y el valor guardado no se separen nunca.
 ETIQUETAS_PERMISO = {
-    "ver": "Ver equipos, estado y cambios",
-    "diferencias": "Ver el contenido de los cambios (diffs)",
-    "equipos.crear": "Anadir equipos",
-    "equipos.editar": "Editar equipos",
-    "equipos.baja": "Dar de baja equipos",
-    "equipos.importar": "Importar desde Excel",
-    "ajustes": "Cambiar los ajustes del programador",
-    "usuarios": "Gestionar usuarios y roles",
+    clave: texto for _, grupo in AREAS for clave, texto in grupo
+}
+
+# Permisos que ARRASTRAN otro: quien puede hacer algo tiene que poder ver la
+# pantalla donde se hace. Se aplica al calcular los efectivos, no al guardar,
+# para que la casilla que marco una persona siga siendo la que ve marcada.
+#
+# Existe porque la alternativa es un rol que "puede editar equipos" y no ve la
+# lista de equipos: la persona marca lo que quiere permitir, guarda, y el panel
+# le contesta 403 en una pantalla que ella misma acaba de habilitar. Eso no se
+# lee como una configuracion estricta, se lee como que el panel esta roto.
+HERENCIA = {
+    "equipos.crear": ("equipos.ver",),
+    "equipos.editar": ("equipos.ver",),
+    "equipos.baja": ("equipos.ver",),
+    "equipos.importar": ("equipos.ver",),
+    "equipos.identidades": ("equipos.ver", "ajustes.ver"),
+    "diferencias": ("cambios.ver",),
+    "ajustes.programador": ("ajustes.ver",),
+    "ajustes.respaldar": ("ajustes.ver",),
+    "ajustes.ssh": ("ajustes.ver",),
+    "ajustes.remoto": ("ajustes.ver",),
+    "ajustes.fondo": ("ajustes.ver",),
+    "datos.borrar": ("ajustes.ver",),
+    "usuarios.crear": ("usuarios.ver",),
+    "usuarios.editar": ("usuarios.ver",),
+    "usuarios.baja": ("usuarios.ver",),
+    "roles.editar": ("usuarios.ver",),
+    "roles.baja": ("usuarios.ver",),
+    "auditoria.desbloquear": ("auditoria.ver",),
+}
+
+# Como se traduce cada permiso viejo al conjunto nuevo. Esto NO es cosmetico:
+# sin ello, al actualizar, los permisos guardados dejarian de existir, se
+# ignorarian (que es lo que se hace con un permiso desconocido) y todo el mundo
+# se quedaria sin acceso -incluido el ultimo administrador, o sea que el panel
+# se cerraria solo y solo se abriria editando el JSON por SSH-.
+#
+# La regla es no cambiarle los permisos a nadie: quien podia hacer algo antes
+# tiene que poder seguir haciendolo despues, ni mas ni menos.
+EQUIVALENCIAS = {
+    "ver": ("estado.ver", "equipos.ver", "cambios.ver"),
+    "ajustes": ("ajustes.ver", "ajustes.programador", "ajustes.respaldar",
+                "ajustes.ssh", "ajustes.remoto", "ajustes.fondo",
+                "equipos.identidades", "datos.borrar"),
+    "usuarios": ("usuarios.ver", "usuarios.crear", "usuarios.editar",
+                 "usuarios.baja", "roles.editar", "roles.baja",
+                 "auditoria.ver", "auditoria.desbloquear"),
 }
 
 # Los roles con los que arranca una instalacion nueva (y a los que se convierte
@@ -133,9 +214,11 @@ ETIQUETAS_PERMISO = {
 # y esta constante solo vuelve a mirarse si el archivo no trae ninguno.
 ROLES_INICIALES = {
     "admin": list(PERMISOS),
-    "operador": ["ver", "diferencias", "equipos.crear", "equipos.editar",
-                 "equipos.baja", "equipos.importar"],
-    "lector": ["ver"],
+    "operador": ["estado.ver", "equipos.ver", "cambios.ver", "diferencias",
+                 "equipos.crear", "equipos.editar", "equipos.baja",
+                 "equipos.importar", "equipos.identidades", "ajustes.ver",
+                 "ajustes.respaldar"],
+    "lector": ["estado.ver", "equipos.ver", "cambios.ver"],
 }
 
 # Nombres de los roles iniciales. Se mantiene por compatibilidad con cli.py,
@@ -147,9 +230,18 @@ ROLES = tuple(ROLES_INICIALES)
 # a montar los permisos si alguien se lia editando roles.
 ROL_ADMIN = "admin"
 
-# El permiso que abre la gestion. Junto con alcance.todo forma la invariante del
-# "ultimo administrador total" (ver el docstring del modulo).
-LLAVE = "usuarios"
+# Los permisos que abren la gestion. Junto con alcance.todo forman la invariante
+# del "ultimo administrador total" (ver el docstring del modulo).
+#
+# Son DOS y hacen falta los dos: 'usuarios.editar' es lo que permite devolverle
+# el rol o el permiso a alguien, y 'usuarios.ver' es lo que permite llegar a esa
+# pantalla. Con uno solo se puede quedar una cuenta que teoricamente manda pero
+# no encuentra la puerta, que a efectos practicos es un panel cerrado.
+LLAVES = ("usuarios.ver", "usuarios.editar")
+
+# Se conserva el nombre viejo porque hay codigo y mensajes que lo usan; apunta
+# al permiso que de verdad reparte, que es el de editar.
+LLAVE = "usuarios.editar"
 
 # Profundidad del alcance. EDITAR incluye VER: quien puede cambiar un equipo
 # evidentemente puede mirarlo.
@@ -536,16 +628,41 @@ class Usuarios:
             por sorpresa, ni ampliandolos ni (peor) dejando a alguien fuera de
             los equipos que llevaba anos mirando.
 
+        De 2 a 3:
+          - Los tres permisos gruesos se cambian por los finos que equivalen a
+            lo mismo, en los ROLES y en las excepciones de cada cuenta (ver
+            EQUIVALENCIAS). Nadie gana ni pierde nada: quien podia entrar a
+            Ajustes sigue pudiendo, y quien no, tampoco.
+          - Esto es obligatorio, no cosmetico. Un permiso desconocido se ignora
+            (es lo correcto cuando se retira uno), asi que sin esta traduccion
+            'usuarios' dejaria de contar y el panel se quedaria sin ningun
+            administrador: cerrado, y solo reabrible editando el JSON por SSH.
+
         Es idempotente porque solo se llama cuando el formato leido es menor
-        que FORMATO, y lo primero que hace la migracion es dejar el archivo
-        escrito con el formato nuevo.
+        que FORMATO, y porque _traducir deja pasar tal cual lo que ya es nuevo.
         """
         log.info("Migrando el archivo de usuarios %s del formato %d al %d",
                  self.ruta, formato, FORMATO)
-        for cuenta in cuentas:
-            cuenta.permisos_mas = []
-            cuenta.permisos_menos = []
-            cuenta.alcance = Alcance(todo=True)
+
+        if formato < 2:
+            for cuenta in cuentas:
+                cuenta.permisos_mas = []
+                cuenta.permisos_menos = []
+                cuenta.alcance = Alcance(todo=True)
+
+        if formato < 3:
+            self._roles = {
+                nombre: sorted(_traducir(permisos))
+                for nombre, permisos in self._roles.items()
+            }
+            for cuenta in cuentas:
+                cuenta.permisos_mas = sorted(_traducir(cuenta.permisos_mas))
+                # Los 'menos' se traducen igual: quien tenia quitado 'ajustes'
+                # tiene que seguir sin poder entrar a Ajustes, y eso ahora son
+                # ocho permisos. Traducir solo los 'mas' le devolveria en
+                # silencio un acceso que alguien le habia retirado a proposito.
+                cuenta.permisos_menos = sorted(_traducir(cuenta.permisos_menos))
+
         return cuentas
 
     def _roles_desde(self, datos) -> dict[str, list[str]]:
@@ -809,10 +926,22 @@ class Usuarios:
         # anade permisos_mas: quitar es la operacion segura, asi que ante un
         # conflicto se queda lo restrictivo.
         efectivos -= set(usuario.permisos_menos or ())
+        # Un permiso viejo guardado en el archivo (o en las excepciones de una
+        # cuenta) se traduce aqui tambien, y no solo al migrar el archivo: entre
+        # que se actualiza el codigo y se reescribe el JSON hay un rato, y
+        # durante ese rato nadie puede quedarse fuera.
+        efectivos = _traducir(efectivos)
         # Lo que no esta en PERMISOS se ignora en vez de reventar: el dia que se
         # retire un permiso, quien lo tuviera guardado tiene que seguir
         # cargando y entrando (ver el docstring del modulo).
-        return {p for p in efectivos if p in PERMISOS}
+        efectivos = {p for p in efectivos if p in PERMISOS}
+        # Y al final se arrastra lo que hace falta para poder USAR lo concedido:
+        # quien puede editar equipos tiene que ver la lista de equipos. Va
+        # DESPUES de permisos_menos a proposito; quitar 'equipos.ver' a quien
+        # puede editar no es una restriccion, es una pantalla rota.
+        for permiso in list(efectivos):
+            efectivos.update(HERENCIA.get(permiso, ()))
+        return efectivos
 
     def permisos(self, usuario: Usuario) -> set[str]:
         """Los permisos efectivos de esa cuenta, con los roles de ahora mismo."""
@@ -1003,7 +1132,12 @@ class Usuarios:
         con 'usuarios' pero con alcance solo a Acme puede administrar, pero no
         puede devolverle el acceso a Bravo a nadie.
         """
-        return bool(usuario.alcance.todo) and LLAVE in cls._permisos_de(usuario, roles)
+        if not usuario.alcance.todo:
+            return False
+        tiene = cls._permisos_de(usuario, roles)
+        # TODAS las llaves, no una cualquiera: repartir de nuevo exige poder
+        # editar cuentas y ademas poder llegar a esa pantalla.
+        return all(llave in tiene for llave in LLAVES)
 
     @classmethod
     def _hay_total(cls, cuentas: list[Usuario], roles: dict[str, list[str]]) -> bool:
@@ -1408,6 +1542,20 @@ def _roles_iniciales() -> dict[str, list[str]]:
     y un descuido dejaria ROLES_INICIALES modificada para todo el proceso.
     """
     return {nombre: list(permisos) for nombre, permisos in ROLES_INICIALES.items()}
+
+
+def _traducir(permisos) -> set[str]:
+    """Cambia los permisos viejos por los nuevos. Idempotente.
+
+    Un permiso que ya sea de los nuevos pasa tal cual, asi que se puede llamar
+    tantas veces como haga falta sin que cambie el resultado. Eso importa
+    porque se llama en dos sitios: al migrar el archivo (una vez) y al calcular
+    los permisos efectivos (en cada peticion).
+    """
+    salida: set[str] = set()
+    for permiso in permisos or ():
+        salida.update(EQUIVALENCIAS.get(permiso, (permiso,)))
+    return salida
 
 
 def _lista_texto(valores) -> list[str]:

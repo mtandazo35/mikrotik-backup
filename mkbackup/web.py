@@ -419,6 +419,32 @@ class Manejador(BaseHTTPRequestHandler):
             detalle=detalle,
         )
 
+    def _a_donde_puede(self, sesion: dict) -> None:
+        """Manda a la primera pantalla que esta cuenta si puede abrir.
+
+        El orden es el de la navegacion (paginas.SECCIONES), asi que a donde se
+        llega es la primera pestana que se ve arriba: lo mismo que habria
+        pulsado la persona. Y sale de la MISMA tabla que pinta el menu, para
+        que no puedan decir cosas distintas.
+        """
+        permisos = sesion.get("puede", set())
+        for destino, _clave, _texto, permiso in paginas.SECCIONES:
+            if destino != "/" and permiso in permisos:
+                self._redirigir(destino)
+                return
+
+        # Ninguna. Es una cuenta a la que no se le dio ni un permiso de ver, y
+        # merece que se le diga eso y no un "no tienes permiso para esto" sobre
+        # una pantalla concreta, que manda a pedir el permiso equivocado.
+        log.warning("%s entro y no puede ver ninguna pantalla",
+                    getattr(self.usuario, "nombre", "?"))
+        self._anotar("sin_pantallas")
+        self._error(
+            403,
+            "Tu cuenta ha entrado bien, pero no tiene permiso para ver ninguna "
+            "pantalla. Pidele a un administrador que te de al menos uno.",
+        )
+
     def _permite(self, accion: str) -> bool:
         """Corta la peticion con un 403 si a la cuenta le falta ese permiso.
 
@@ -631,11 +657,26 @@ class Manejador(BaseHTTPRequestHandler):
         sesion = self._para_pintar(self.usuario)
 
         if ruta == "/":
+            # Quien no puede ver Estado NO se encuentra un 403 nada mas entrar:
+            # se le lleva a la primera pantalla que si puede usar. Con permisos
+            # finos esto deja de ser un caso raro y pasa a ser lo normal -"que
+            # solo vea la lista de equipos" es justo para lo que se partieron
+            # los permisos-, y aterrizar en una pagina de error al escribir bien
+            # la clave se lee como que el panel no funciona, no como que a esa
+            # cuenta le falta un permiso.
+            if "estado.ver" not in sesion.get("puede", set()):
+                self._a_donde_puede(sesion)
+                return
             self._html(
                 paginas.panel(sesion, cfg.web.refresco, cfg.zona_horaria)
             )
 
         elif ruta == "/api/estado":
+            # El mismo permiso que la pantalla que lo pinta: esta ruta ES el
+            # contenido de Estado. Sin comprobarlo, quien no puede abrir la
+            # pantalla se lleva igual las cifras pidiendo el JSON a mano.
+            if not self._permite("estado.ver"):
+                return
             datos = self._estado_visible()
             # El proximo ciclo lo publica el programador en su propio archivo:
             # se pega aqui para que el panel haga una sola peticion, recortado
@@ -644,13 +685,16 @@ class Manejador(BaseHTTPRequestHandler):
             self._json(datos)
 
         elif ruta == "/api/identidades":
-            # Mismo permiso que la pantalla que lo pinta: el sondeo dice
-            # nombres de equipos, y quien no puede ver ajustes tampoco esto.
-            if not self._permite("ajustes"):
+            # Mismo permiso que el boton que lo lanza: lo que devuelve son los
+            # nombres que van diciendo los routers, o sea el resultado del
+            # sondeo. Quien no puede pedirlo tampoco tiene por que leerlo.
+            if not self._permite("equipos.identidades"):
                 return
             self._api_identidades()
 
         elif ruta == "/equipos":
+            if not self._permite("equipos.ver"):
+                return
             equipos, avisos = self._inventario_visible()
             filtro = self._filtro()
             consulta = self._consulta()
@@ -666,8 +710,12 @@ class Manejador(BaseHTTPRequestHandler):
             self._html(
                 paginas.equipos(
                     visibles, avisos,
-                    cfg.web.editar_inventario
-                    and self.ctx.usuarios.puede(self.usuario, "equipos.editar"),
+                    # El interruptor CRUDO del modo solo lectura, sin mezclarlo
+                    # con ningun permiso: la pagina ya decide boton a boton con
+                    # los permisos de la sesion. Mezclados aqui, una cuenta que
+                    # puede ANADIR pero no editar se quedaba sin el boton de
+                    # anadir, porque el permiso de editar apagaba los dos.
+                    cfg.web.editar_inventario,
                     self._consulta().get("ok", ""),
                     empresas=self._valores(equipos, "empresa"),
                     grupos=self._valores(equipos, "grupo"),
@@ -711,26 +759,38 @@ class Manejador(BaseHTTPRequestHandler):
             self._html(paginas.importar(imp.hay_soporte_xlsx(), sesion=sesion))
 
         elif ruta == "/importar/plantilla":
-            if not self._editable("equipos.importar"):
+            # Solo 'equipos.ver' y NO 'equipos.importar': lo que se descarga es
+            # una hoja vacia con las columnas y las instrucciones, sin un solo
+            # dato de la flota. No hace falta poder importar para mirar que
+            # formato pide el sistema (por ejemplo, para prepararle el archivo
+            # a quien si puede subirlo).
+            if not self._permite("equipos.ver"):
                 return
             self._plantilla()
 
         elif ruta == "/cambios":
+            if not self._permite("cambios.ver"):
+                return
             self._cambios()
 
         elif ruta == "/historial":
+            # Es la ficha de UN equipo, asi que pide ver equipos y no ver
+            # cambios: se llega desde la lista de la flota, y lo que ensena son
+            # las versiones de ese equipo concreto.
+            if not self._permite("equipos.ver"):
+                return
             self._historial()
 
         elif ruta == "/diferencia":
             self._diferencia()
 
         elif ruta == "/ajustes":
-            if not self._permite("ajustes"):
+            if not self._permite("ajustes.ver"):
                 return
             self._pintar_ajustes()
 
         elif ruta == "/usuarios":
-            if not self._permite("usuarios"):
+            if not self._permite("usuarios.ver"):
                 return
             cuentas = self.ctx.usuarios.listar()
             self._html(paginas.usuarios(
@@ -741,7 +801,10 @@ class Manejador(BaseHTTPRequestHandler):
             ))
 
         elif ruta == "/usuarios/nuevo":
-            if not self._permite("usuarios"):
+            # El formulario pide ya el permiso de CREAR, igual que en equipos:
+            # rellenar un alta que despues se va a rechazar no es informacion,
+            # es hacerle perder el trabajo a quien la escribio.
+            if not self._permite("usuarios.crear"):
                 return
             self._html(self._pintar_formulario_usuario(
                 {"rol": "lector", "permisos": self.ctx.usuarios.roles().get("lector", []),
@@ -749,7 +812,9 @@ class Manejador(BaseHTTPRequestHandler):
             ))
 
         elif ruta == "/usuarios/rol":
-            if not self._permite("usuarios"):
+            # Mismo permiso que el POST que lo guarda: esta pantalla es el
+            # editor de un rol, no una ficha de consulta.
+            if not self._permite("roles.editar"):
                 return
             nombre = self._consulta().get("rol", "")
             roles = self.ctx.usuarios.roles()
@@ -759,14 +824,16 @@ class Manejador(BaseHTTPRequestHandler):
             ))
 
         elif ruta == "/usuarios/editar":
-            if not self._permite("usuarios"):
+            # El formulario solo pide VER: quien no pueda guardar se topara con
+            # el 403 en el POST, pero la ficha de una cuenta (su rol, sus
+            # permisos y su alcance) es justo lo que hay que poder consultar
+            # para saber a quien pedirle un cambio.
+            if not self._permite("usuarios.ver"):
                 return
             self._editar_usuario()
 
         elif ruta == "/auditoria":
-            # Con el mismo permiso que gestionar cuentas: quien puede crear
-            # usuarios es quien tiene que poder ver que se ha hecho con ellos.
-            if not self._permite("usuarios"):
+            if not self._permite("auditoria.ver"):
                 return
             consulta = self._consulta()
             try:
@@ -1291,49 +1358,54 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/importar":
             self._importacion()
         elif ruta == "/ajustes":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.programador"):
                 self._ajustes()
         elif ruta == "/ajustes/respaldar":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.respaldar"):
                 self._respaldar_ahora()
         elif ruta == "/ajustes/identidades":
-            if self._permite("ajustes"):
-                self._identidades_masivo()
+            # Sin comprobar aqui: el permiso lo mira el propio manejador, que
+            # ademas necesita _editable (renombra equipos del inventario).
+            self._identidades_masivo()
         elif ruta == "/ajustes/remoto":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.remoto"):
                 self._ajustes_remoto()
         elif ruta == "/ajustes/remoto/probar":
-            if self._permite("ajustes"):
+            # Probar es parte de configurar a donde se sube: quien no puede
+            # cambiar el remoto tampoco tiene por que hacerle hablar al panel
+            # con el servidor de fuera.
+            if self._permite("ajustes.remoto"):
                 self._probar_remoto()
         elif ruta == "/ajustes/ssh":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.ssh"):
                 self._ajustes_ssh()
         elif ruta == "/ajustes/fondo":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.fondo"):
                 self._ajustes_fondo()
         elif ruta == "/ajustes/fondo/quitar":
-            if self._permite("ajustes"):
+            if self._permite("ajustes.fondo"):
                 self._ajustes_fondo_quitar()
         elif ruta == "/ajustes/datos/borrar":
-            if self._permite("ajustes"):
-                self._borrar_datos()
+            # Igual que identidades: lo comprueba el manejador, y con _editable
+            # porque tira datos de la flota.
+            self._borrar_datos()
         elif ruta == "/usuarios/nuevo":
-            if self._permite("usuarios"):
+            if self._permite("usuarios.crear"):
                 self._alta_usuario()
         elif ruta == "/usuarios/editar":
-            if self._permite("usuarios"):
+            if self._permite("usuarios.editar"):
                 self._editar_usuario_post()
         elif ruta == "/usuarios/baja":
-            if self._permite("usuarios"):
+            if self._permite("usuarios.baja"):
                 self._baja_usuario()
         elif ruta == "/usuarios/rol":
-            if self._permite("usuarios"):
+            if self._permite("roles.editar"):
                 self._rol_post()
         elif ruta == "/usuarios/rol/baja":
-            if self._permite("usuarios"):
+            if self._permite("roles.baja"):
                 self._rol_baja()
         elif ruta == "/auditoria/desbloquear":
-            if self._permite("usuarios"):
+            if self._permite("auditoria.desbloquear"):
                 self._desbloquear()
         elif ruta == "/cuenta":
             self._cambiar_mi_clave()
@@ -2275,9 +2347,12 @@ class Manejador(BaseHTTPRequestHandler):
         no quede nada suyo, y "esta borrado pero sigue en el historial" no es
         eso.
         """
-        # Dos permisos, y los dos hacen falta: la ruta esta bajo /ajustes, pero
-        # lo que hace es tirar los datos de un equipo. Ver /ajustes/identidades.
-        if not self._editable("equipos.baja"):
+        # Con _editable y no con _permite aunque el permiso sea de Ajustes: el
+        # panel en modo solo lectura no puede borrar respaldos, igual que no
+        # puede dar de baja un equipo. 'datos.borrar' es su propio permiso y no
+        # 'equipos.baja' porque son cosas distintas: dar de baja deja los
+        # respaldos donde estan, y esto es justo lo contrario.
+        if not self._editable("datos.borrar"):
             return
         campos = self._campos()
         if campos is None:
@@ -2407,7 +2482,11 @@ class Manejador(BaseHTTPRequestHandler):
         aqui solo se arranca; el trabajo lo hace identidades.py en segundo
         plano y la pantalla lo va mirando.
         """
-        if not self._editable("equipos.editar"):
+        # Su propio permiso, y con _editable: esto reescribe el nombre de los
+        # equipos en el inventario, asi que en modo solo lectura no va. Se
+        # separo de 'equipos.editar' porque son riesgos distintos: uno cambia
+        # una ficha a mano, este sale a hablar con toda la flota de golpe.
+        if not self._editable("equipos.identidades"):
             return
         campos = self._campos()
         if campos is None:
