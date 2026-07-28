@@ -19,3 +19,11 @@ tests/.dns_simulado
 # login, notas, pruebas. El panel la sirve desde donde diga web.fondo_login,
 # asi que no tiene por que vivir en el repositorio.
 /local/
+
+# Ajustes de Claude Code. El compartido (.claude/settings.json) SI se sube: es
+# una lista corta de comandos de solo lectura que evita tener que aprobar la
+# bateria de pruebas una por una. El .local NO: son cientos de permisos de un
+# solo uso que se acumulan al ir dando a "permitir", pesa 70 KB y no le sirve a
+# nadie mas.
+/.claude/settings.local.json
+/.claude/*.tmp.*
