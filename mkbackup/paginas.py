@@ -480,6 +480,24 @@ ESTILO = """
   .pareja { display: grid; gap: 1rem; align-items: start;
             grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
 
+  /* Mosaico para Ajustes, que son muchos cuadros y de alturas muy distintas.
+     No es una rejilla: en una rejilla, cada FILA mide lo que el cuadro mas alto
+     de esa fila, asi que al lado de uno largo queda un hueco en blanco tan alto
+     como la diferencia. Con seis cuadros eso eran tres huecos, y se veian.
+
+     Se hace con columnas de CSS, que van llenando de arriba abajo y saltan a la
+     siguiente cuando toca: los cuadros se empaquetan sin dejar aire. El
+     `break-inside: avoid` impide que uno se parta por la mitad entre dos
+     columnas, y el `inline-block` con ancho completo esta porque sin el algunos
+     navegadores se saltan ese avoid. */
+  .mosaico { columns: 2; column-gap: 1rem; }
+  .mosaico > .tarjeta { break-inside: avoid; -webkit-column-break-inside: avoid;
+                        display: inline-block; width: 100%;
+                        margin: 0 0 1rem; }
+  /* Por debajo de esto, dos columnas dejan los campos demasiado estrechos para
+     escribir en ellos: pasa a una sola y los cuadros se apilan. */
+  @media (max-width: 1000px) { .mosaico { columns: 1; } }
+
   /* Cabecera de tabla que se puede pulsar para ordenar. El enlace hereda el
      estilo de la cabecera para que no parezca un enlace suelto dentro de la
      tabla, pero cambia el cursor y se subraya al pasar por encima. */
@@ -2388,9 +2406,14 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
        marcha no se puede lanzar, porque ese ciclo tambien renombra.</p>
     <div id="sondeo" class="sondeo" hidden></div>"""
 
+    # El orden es el de uso, no el de importancia: lo que se toca a diario
+    # arriba (cada cuanto se respalda, con que se entra a los routers) y lo que
+    # se toca una vez al instalar mas abajo. El mosaico va rellenando de arriba
+    # abajo y salta de columna solo cuando no cabe, asi que ese orden se
+    # mantiene al leer.
     cuerpo = f"""
   {bloque_error}{bloque_ok}
-  <div class="pareja">
+  <div class="mosaico">
   <div class="tarjeta">
     <h2>Cada cuanto se buscan cambios</h2>
     {estado_prog}
@@ -2448,9 +2471,6 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
     </form>
   </div>
 
-  </div>
-
-  <div class="pareja">
   <div class="tarjeta">
     <h2>Nombre de los routers</h2>
     {bloque_identidades}
@@ -2460,19 +2480,20 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
     <h2>A donde se suben los respaldos</h2>
     {_bloque_remoto(cfg, replica or {}, zona)}
   </div>
-  </div>
 
-  <div class="pareja">
   <div class="tarjeta">
     <h2>Pantalla de entrada</h2>
     {bloque_fondo}
   </div>
+  </div>
 
+  <!-- Este a lo ancho y fuera del mosaico: lleva una tabla de cinco columnas
+       mas un formulario por fila, y a media pagina se queda con las columnas
+       apretadas y la barra de desplazamiento puesta. -->
   <div class="tarjeta">
     <h2>Borrar los datos de un equipo</h2>
     {_aviso_remoto_al_borrar(cfg)}
     {_bloque_datos(huerfanos or [], zona)}
-  </div>
   </div>
 
   <div class="tarjeta apagado">
