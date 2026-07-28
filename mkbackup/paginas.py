@@ -57,6 +57,27 @@ def esc(valor) -> str:
     return escape("" if valor is None else str(valor), quote=True)
 
 
+def dato_js(valor) -> str:
+    """Un valor de Python listo para meterlo DENTRO de un <script>.
+
+    `json.dumps` a secas no vale ahi, y esta es la unica trampa del sitio:
+    dentro de un <script> el navegador busca la cadena '</script>' ANTES de
+    interpretar nada de JavaScript. O sea que un nombre que la contenga cierra
+    el bloque y lo que sigue deja de ser un texto para ser HTML. Escapar el
+    '<' lo corta de raiz -y de paso el '<!--', que es la otra secuencia que el
+    parser busca ahi dentro-, y para JSON un \\u003c es exactamente el mismo
+    caracter, asi que el dato no cambia.
+
+    El `ensure_ascii=True` va escrito aunque sea el valor por defecto: es lo
+    que deja fuera U+2028 y U+2029, que son saltos de linea para JavaScript
+    aunque no lo sean para JSON, y romperian el guion desde dentro de una
+    cadena. En este mismo proyecto hay un `json.dumps(..., ensure_ascii=False)`
+    (la respuesta de /api), asi que dejarlo implicito aqui es invitar a que
+    alguien copie aquel y abra el agujero sin tocar nada que se vea.
+    """
+    return json.dumps(valor, ensure_ascii=True).replace("<", "\\u003c")
+
+
 def fecha(iso: str, zona=None) -> str:
     """Una marca ISO en hora local y legible: '26/07/2026 12:35'.
 
@@ -524,6 +545,28 @@ ESTILO = """
            display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; }
   .ahora .pista { flex: 1; min-width: 200px; margin: 0; }
   .casilla.destacada { margin-bottom: .8rem; }
+
+  /* --- Sondeo de nombres ---
+     Preguntarle el nombre a la flota entera tarda minutos, asi que hay que
+     ensenar que esta pasando algo. Sin esto, el boton parece no hacer nada y
+     se pulsa otra vez. */
+  .sondeo { border-top: 1px solid var(--borde); padding-top: 1.1rem;
+            margin-top: 1.1rem; }
+  /* La barra de avance y los recuadros son los MISMOS que ya usa el panel
+     (.barra y .cifra): aqui solo se aprieta el tamano. Tener dos barras de
+     progreso con colores distintos en el mismo panel no es una variante, es un
+     descuido; y --v1 es un color de identidad de las graficas, que tiene
+     prohibido usarse para otra cosa (ver los tokens de arriba). */
+  .sondeo .barra { margin: .55rem 0 .8rem; }
+  .cuentas { margin: .2rem 0 .3rem; gap: .5rem; }
+  .cuentas .cifra { padding: .5rem .7rem; }
+  .cuentas .cifra b { font-size: 1.25rem; }
+  .renombres { list-style: none; padding: 0; margin: .5rem 0 0; }
+  .renombres li { font-size: .85rem; padding: .22rem 0;
+                  border-bottom: 1px solid var(--borde); }
+  .renombres li:last-child { border-bottom: 0; }
+  .renombres .de { color: var(--suave); }
+  .renombres .por-que { color: var(--fallo); }
 
   /* --- Adaptable ---
      Tres cortes, cada uno por un motivo concreto y no por un tamano de moda:
@@ -1060,19 +1103,24 @@ function pintar(d) {
   // El desglose por cliente se anade DETRAS y solo si hay algo que contar: con
   // la flota entera bien, un "0 clientes con fallos" permanente ensena a no
   // mirar ese sitio, y entonces el dia que ponga 2 tampoco se mira.
+  //
+  // Dicen "Empresas" y no "Clientes" porque Empresa es como se llama ese campo
+  // en el alta de un equipo, en la columna de la tabla y en el filtro. Con dos
+  // palabras para la misma cosa hay que adivinar que cuenta cada recuadro, y
+  // "no se que busca" fue exactamente lo que se pregunto quien lo usa.
   const recuadros = [
-    ["Clientes", clientes.length, ""],
+    ["Empresas", clientes.length, ""],
     ["Equipos", equipos.length, ""],
     ["Respaldados", respaldados, ""],
     ["Fallidos", fallidos, fallidos ? "malo" : ""],
     ["Proximo ciclo", proximo, ""],
   ];
   if (clientesFallo) {
-    recuadros.push(["Clientes con fallos", clientesFallo, "malo"]);
-    recuadros.push(["Clientes al dia", clientesBien, ""]);
+    recuadros.push(["Empresas con fallos", clientesFallo, "malo"]);
+    recuadros.push(["Empresas al dia", clientesBien, ""]);
   }
   if (clientesPendiente) {
-    recuadros.push(["Clientes pendientes", clientesPendiente, ""]);
+    recuadros.push(["Empresas pendientes", clientesPendiente, ""]);
   }
   document.getElementById("cifras").innerHTML = recuadros
     .map(([t, v, clase]) => `<div class="cifra ${clase}"><b>${escapar(v)}</b>` +
@@ -1653,6 +1701,7 @@ def cambios(
     desde: int = 0,
     total: int = 0,
     por_pagina: int = 10,
+    aviso: str = "",
 ) -> str:
     """`lista` son pares (ruta_relativa, Version) mas recientes primero.
 
@@ -1728,6 +1777,7 @@ def cambios(
     )
 
     cuerpo = f"""
+  {f'<div class="aviso">{esc(aviso)}</div>' if aviso else ""}
   {filtros("/cambios", empresas, grupos, filtro)}
   <div class="barra-acciones">
     <span class="crece"></span>
@@ -1866,8 +1916,163 @@ def diferencia(equipo: str, ruta: str, commit: str, lineas, oculto: bool,
 # --- Ajustes ----------------------------------------------------------------
 
 
+GUION_SONDEO = """
+// El bloque de "preguntando el nombre a los routers" se pinta AQUI y no en el
+// servidor, aunque el servidor ya sepa como va. El motivo: mientras corre, el
+// estado cambia cada pocos segundos, y hacerlo en los dos sitios significa dos
+// dibujantes del mismo dato que se van separando con cada arreglo. El servidor
+// manda el estado inicial y a partir de ahi manda este.
+const CADA = 2000;
+// Tras varios fallos seguidos se deja de preguntar. Sin esto, un 500, un
+// reinicio del servicio o un permiso retirado en caliente dejan la pestana
+// pidiendo cada dos segundos para siempre, que es justo lo que se queria
+// evitar parando el temporizador al terminar.
+const FALLOS_SEGUIDOS = 5;
+
+function escapar(t) {
+  return String(t == null ? "" : t).replace(/[&<>"]/g, c => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+}
+
+const caja = document.getElementById("sondeo");
+
+function cuenta(n, etq, malo) {
+  return `<div class="cifra ${malo && n ? "malo" : ""}"><b>${n}</b>` +
+         `<span>${escapar(etq)}</span></div>`;
+}
+
+function pintarSondeo(d) {
+  if (!d || d.vacio) { caja.hidden = true; caja.innerHTML = ""; return; }
+  caja.hidden = false;
+
+  // El error manda sobre todo lo demas. Al reves -mirando 'corriendo' primero-
+  // un sondeo que ya se sabe roto se sigue pintando como si avanzara.
+  let html = "";
+  if (d.error) {
+    html += `<div class="error">${escapar(d.error)}</div>`;
+  } else if (d.corriendo) {
+    // Son dos fases y tardan las dos: preguntar abre una sesion SSH por equipo,
+    // y renombrar mueve archivos y reescribe el inventario de uno en uno. Sin
+    // decir en cual va, la barra se queda quieta en N de N y no se distingue de
+    // un proceso colgado.
+    const aplicando = d.fase === "renombrando";
+    const hechos = aplicando ? (d.aplicados || 0) : (d.preguntados || 0);
+    const total = d.total || 0;
+    const pct = total ? Math.round((hechos / total) * 100) : 100;
+    html += `<p class="sub">` + (aplicando
+      ? `Poniendo los nombres nuevos: ${hechos} de ${total}.`
+      : `Preguntando a los routers: ${hechos} de ${total}.` +
+        ` Los que no contestan tardan lo que tarde su timeout.`) +
+      `</p><div class="barra"><div style="width:${pct}%"></div></div>`;
+  } else {
+    html += `<p class="sub">Terminado. Se pregunto a ${d.total || 0} equipo(s).</p>`;
+  }
+  if (d.aviso) html += `<div class="aviso">${escapar(d.aviso)}</div>`;
+
+  html += '<div class="cifras cuentas">' +
+    cuenta(d.renombrados || 0, "renombrados") +
+    cuenta(d.iguales || 0, "ya estaban bien") +
+    cuenta(d.mudos || 0, "sin respuesta", true) +
+    cuenta(d.rechazados || 0, "no se pudo", true) +
+    "</div>";
+
+  const renombrados = d.detalle_renombrados || [];
+  if (renombrados.length) {
+    html += '<ul class="renombres">' + renombrados.map(p =>
+      `<li><span class="de">${escapar(p[0])}</span> &rarr; <b>${escapar(p[1])}</b></li>`
+    ).join("") + "</ul>";
+    if ((d.renombrados || 0) > renombrados.length) {
+      html += `<p class="pista">y ${d.renombrados - renombrados.length} mas.</p>`;
+    }
+  }
+
+  const rechazados = d.detalle_rechazados || [];
+  if (rechazados.length) {
+    html += '<p class="pista separado">No se les pudo poner el nombre que dijeron:</p>' +
+      '<ul class="renombres">' + rechazados.map(p =>
+        `<li>${escapar(p[0])} <span class="por-que">${escapar(p[1])}</span></li>`
+      ).join("") + "</ul>";
+  }
+
+  const mudos = d.detalle_mudos || [];
+  if (mudos.length) {
+    html += '<p class="pista separado">Sin respuesta: ' +
+      mudos.map(escapar).join(", ") +
+      ((d.mudos || 0) > mudos.length ? ` y ${d.mudos - mudos.length} mas` : "") +
+      ". Se les vuelve a preguntar cuando quieras; ninguno se cambio.</p>";
+  }
+
+  caja.innerHTML = html;
+}
+
+let latido = 0;
+let seguidos = 0;
+
+function parar() {
+  if (latido) { clearInterval(latido); latido = 0; }
+}
+
+function ciego(motivo) {
+  // Que se VEA que el panel esta ciego, igual que hace la pantalla de estado.
+  // Dejar la barra congelada sin decir nada es peor que no pintarla: un 40%
+  // parado no distingue "el sondeo va lento" de "no hay servidor".
+  const nota = document.createElement("p");
+  nota.className = "sub caido";
+  nota.textContent = motivo;
+  caja.hidden = false;
+  caja.appendChild(nota);
+}
+
+async function mirarSondeo() {
+  let d;
+  try {
+    const resp = await fetch("/api/identidades", { cache: "no-store" });
+    // La sesion caduco con la pestana abierta.
+    if (resp.status === 401) { parar(); location.href = "/entrar"; return; }
+    // Le quitaron el permiso en caliente. No se reintenta: cada intento deja
+    // una linea de auditoria, y a dos segundos el vista rota y se lleva por
+    // delante los eventos de verdad.
+    if (resp.status === 403) {
+      parar();
+      ciego("Tu cuenta ya no puede ver esto.");
+      return;
+    }
+    if (!resp.ok) throw new Error(resp.status);
+    d = await resp.json();
+    seguidos = 0;
+  } catch (err) {
+    if (++seguidos >= FALLOS_SEGUIDOS) {
+      parar();
+      ciego("Sin conexion con el servidor. Recarga la pagina para volver a mirar.");
+    }
+    return;
+  }
+
+  pintarSondeo(d);
+  // Se deja de preguntar en cuanto termina: un temporizador vivo para siempre
+  // en una pestana olvidada es una peticion cada dos segundos toda la noche.
+  if (!d || d.vacio || !d.corriendo) {
+    parar();
+    // Los renombrados cambian las cuentas del desplegable de arriba, que se
+    // pintaron al cargar. Se va a /ajustes por GET y NO con location.reload():
+    // esta pagina se sirve como respuesta al POST del boton, asi que recargar
+    // seria reenviar ese POST y lanzar el sondeo otra vez sobre la flota
+    // entera (con el dialogo de "confirmar reenvio" por delante). Es la misma
+    // razon por la que el panel contesta 303 despues de un alta.
+    if (d && !d.vacio && (d.renombrados || 0) > 0) location.href = "/ajustes";
+  }
+}
+
+pintarSondeo(INICIAL);
+if (INICIAL && !INICIAL.vacio && INICIAL.corriendo) {
+  latido = setInterval(mirarSondeo, CADA);
+}
+"""
+
+
 def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=None,
-            sesion=None, fondo: str = "") -> str:
+            sesion=None, fondo: str = "", sondeo=None, equipos_totales: int = 0,
+            equipos_sin_nombre: int = 0) -> str:
     bloque_error = f'<div class="error">{esc(error)}</div>' if error else ""
     bloque_ok = f'<div class="bien">{esc(mensaje)}</div>' if mensaje else ""
 
@@ -1944,6 +2149,37 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
         else "Un equipo con usuario o clave propios manda sobre esto, campo a campo."
     )
 
+    # El desplegable dice CUANTOS son en cada caso. Sin la cifra, elegir entre
+    # las dos opciones es adivinar: nadie sabe de memoria cuantos equipos
+    # entraron por Excel sin nombre. Y son los equipos que ESTA cuenta puede
+    # editar, que es a los que se les va a preguntar de verdad.
+    con_nombre = max(0, equipos_totales - equipos_sin_nombre)
+    bloque_identidades = f"""
+    <p class="sub">Le pregunta a cada router su <code>/system identity</code> y le
+       pone ese nombre. Es el mismo boton que hay en la ficha de un equipo, pero
+       para muchos de golpe.</p>
+    <form method="post" action="/ajustes/identidades">
+      <div class="campo">
+        <label for="alcance">A quien se le pregunta</label>
+        <select id="alcance" name="alcance">
+          <option value="provisionales">Solo los que se llaman como su IP
+            ({esc(equipos_sin_nombre)})</option>
+          <option value="todos">Todos los equipos ({esc(equipos_totales)})</option>
+        </select>
+        <div class="pista">Los que se llaman como su IP son los que entraron sin
+           nombre, casi siempre por importacion. Con "todos" tambien se
+           renombran los {esc(con_nombre)} que ya tienen nombre puesto a mano:
+           el del router manda y el que escribiste se pierde. El historial no:
+           el respaldo se mueve con el equipo.</div>
+      </div>
+      <button type="submit" class="secundario">Preguntar el nombre a los routers</button>
+    </form>
+    <p class="pista separado">Tarda: es una sesion SSH por equipo, y los que
+       esten apagados hay que esperar a que agoten su tiempo. Corre por su
+       cuenta, asi que puedes cerrar esta pantalla. Mientras haya un respaldo en
+       marcha no se puede lanzar, porque ese ciclo tambien renombra.</p>
+    <div id="sondeo" class="sondeo" hidden></div>"""
+
     cuerpo = f"""
   {bloque_error}{bloque_ok}
   <div class="pareja">
@@ -2006,6 +2242,11 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
 
   </div>
 
+  <div class="tarjeta">
+    <h2>Nombre de los routers</h2>
+    {bloque_identidades}
+  </div>
+
   <div class="tarjeta estrecho">
     <h2>Pantalla de entrada</h2>
     {bloque_fondo}
@@ -2029,7 +2270,10 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
     </table></div>
   </div>
 """
-    return envoltura("mkbackup - ajustes", cuerpo, sesion, activo="ajustes")
+    return envoltura(
+        "mkbackup - ajustes", cuerpo, sesion, activo="ajustes",
+        guion=f"const INICIAL = {dato_js(sondeo)};\n{GUION_SONDEO}",
+    )
 
 
 # --- Usuarios ---------------------------------------------------------------
@@ -2259,7 +2503,7 @@ def formulario_permisos(datos: dict, roles: dict, permisos, etiquetas_permiso,
     # Cada rol lleva sus permisos al HTML para que elegirlo marque las casillas
     # sin ir al servidor. El servidor vuelve a validar lo que llegue: esto es
     # comodidad, no una comprobacion.
-    mapa_roles = json.dumps({r: list(p) for r, p in roles.items()})
+    mapa_roles = dato_js({r: list(p) for r, p in roles.items()})
 
     campo_nombre = (
         f'<input id="nombre" type="text" name="nombre" value="{esc(nombre)}"'

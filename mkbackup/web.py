@@ -46,6 +46,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import historial as hist
+from . import identidades
 from . import importar as imp
 from . import paginas
 from .config import Config, zona_horaria
@@ -317,6 +318,13 @@ class Manejador(BaseHTTPRequestHandler):
         # Que nadie lo empotre en un iframe para robar clics sobre la sesion.
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
+        # Si algo decidio antes que esta conexion no sigue (ver _error), hay que
+        # DECIRLO. Poner solo el atributo cierra el socket pero sin avisar, y el
+        # navegador se entera intentando reutilizar una conexion que ya no esta:
+        # una peticion perdida y un reintento, en vez de abrir otra y ya. La
+        # cabecera es lo unico que convierte "se corto" en "se cerro".
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for clave, valor in extra or []:
             self.send_header(clave, valor)
         self.end_headers()
@@ -338,6 +346,19 @@ class Manejador(BaseHTTPRequestHandler):
         )
 
     def _error(self, codigo: int, texto: str) -> None:
+        # Se cierra la conexion al contestar un error, y no es por cortesia.
+        # Casi todos los caminos que llegan aqui cortan ANTES de leer el cuerpo
+        # del POST ("no tienes permiso", "el panel es de solo lectura", "esa
+        # pagina no existe"). Con HTTP/1.1 la conexion se queda abierta, y lo
+        # que quede sin leer en el socket lo interpreta la peticion SIGUIENTE
+        # como su primera linea: el navegador ve la conexion caerse a la mitad
+        # mientras el registro del servidor dice que se contesto bien.
+        #
+        # Ya paso una vez por un formulario que no leia su cuerpo. La respuesta
+        # entonces fue arreglar ese formulario; esto lo cierra para todos los
+        # errores de golpe, que es donde el descuido es mas probable porque el
+        # camino de error es justo el que nadie prueba a mano.
+        self.close_connection = True
         self._html(paginas.error(codigo, texto), codigo)
 
     # --- Sesion -------------------------------------------------------------
@@ -404,6 +425,14 @@ class Manejador(BaseHTTPRequestHandler):
         Se comprueba aqui, en el servidor, y no solo escondiendo botones: la
         navegacion oculta lo que no se puede usar, pero cualquiera puede
         escribir la URL a mano.
+
+        A una ruta de /api/ se le contesta JSON. Parece cosmetico y no lo es:
+        el JS que consume esas rutas pregunta cada pocos segundos, y una pagina
+        de error en HTML no le dice nada que sepa interpretar, asi que sigue
+        preguntando. Con una pestana abierta a la que le quitan el permiso en
+        caliente, eso son miles de peticiones al dia, y CADA UNA escribe una
+        linea de auditoria: el registro rota y se lleva por delante los eventos
+        de verdad. Un fallo de permisos que acaba borrando las pruebas.
         """
         if self.usuario is not None and self.ctx.usuarios.puede(self.usuario, accion):
             return True
@@ -412,7 +441,11 @@ class Manejador(BaseHTTPRequestHandler):
             getattr(self.usuario, "nombre", "?"), accion,
         )
         self._anotar("sin_permiso", f"{accion} en {self.path.split('?')[0]}")
-        self._error(403, "Tu cuenta no tiene permiso para esto.")
+        if urlparse(self.path).path.startswith("/api/"):
+            self.close_connection = True
+            self._json({"error": "sin permiso"}, 403)
+        else:
+            self._error(403, "Tu cuenta no tiene permiso para esto.")
         return False
 
     # --- Alcance: sobre QUE equipos vale lo que puede hacer -----------------
@@ -560,7 +593,7 @@ class Manejador(BaseHTTPRequestHandler):
             return
 
         if self.usuario is None:
-            if ruta == "/api/estado":
+            if ruta.startswith("/api/"):
                 # Al JS se le responde 401 y el se va al login; un 303 aqui le
                 # daria el HTML del formulario como si fuera el estado.
                 self._json({"error": "sin sesion"}, 401)
@@ -593,6 +626,13 @@ class Manejador(BaseHTTPRequestHandler):
             # al alcance igual que el resto.
             datos["programador"] = self._programador_visible()
             self._json(datos)
+
+        elif ruta == "/api/identidades":
+            # Mismo permiso que la pantalla que lo pinta: el sondeo dice
+            # nombres de equipos, y quien no puede ver ajustes tampoco esto.
+            if not self._permite("ajustes"):
+                return
+            self._api_identidades()
 
         elif ruta == "/equipos":
             equipos, avisos = self._inventario_visible()
@@ -671,12 +711,7 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes":
             if not self._permite("ajustes"):
                 return
-            self._html(
-                paginas.ajustes(
-                    cfg, estado_programador(cfg), zona=self.ctx.zona, sesion=sesion,
-                    fondo=self._marca_fondo(),
-                )
-            )
+            self._pintar_ajustes()
 
         elif ruta == "/usuarios":
             if not self._permite("usuarios"):
@@ -838,6 +873,60 @@ class Manejador(BaseHTTPRequestHandler):
         except ErrorInventario as exc:
             return [], [str(exc)]
 
+    def _equipos_del_estado(self, datos: dict) -> list[dict]:
+        """La flota de AHORA con el resultado que tenga cada uno del ultimo ciclo.
+
+        La lista manda el INVENTARIO, no el archivo de estado, y esto es lo que
+        hay que entender: el archivo de estado es la foto del ultimo ciclo, y
+        entre ese ciclo y ahora la flota puede haber cambiado.
+
+        Pasaban las dos cosas, y las dos se veian como una cifra que no cuadra
+        con la realidad:
+
+          - se da de baja un equipo y Estado seguia contandolo durante horas,
+            hasta el siguiente ciclo. Con un solo equipo en la flota, el panel
+            decia "1 equipo, 1 respaldado" sobre un router que ya no existe.
+          - se da de alta uno y NO aparecia hasta que le tocara turno, asi que
+            el panel decia "3 equipos" cuando en Equipos habia 4.
+
+        Ahora se parte de lo que hay y se le pega encima lo que se sepa: un
+        equipo recien dado de alta sale como PENDIENTE, que es exactamente lo
+        que es, y uno dado de baja desaparece en el acto.
+        """
+        try:
+            equipos, _ = self._inventario_visible()
+        except ErrorInventario:
+            # Sin inventario legible no se puede decir cual es la flota. Se cae
+            # a lo que diga el estado: es dato viejo, pero es mejor que una
+            # pantalla en blanco cuando lo que falla es el CSV.
+            return [
+                e for e in datos.get("equipos", [])
+                if self.usuario.alcance.puede_ver(
+                    e.get("empresa", ""), e.get("nombre", ""))
+            ]
+
+        del_ciclo = {e.get("nombre", ""): e for e in datos.get("equipos", [])}
+        salida = []
+        for equipo in equipos:
+            visto = del_ciclo.get(equipo.nombre)
+            if visto is not None:
+                # La empresa y el grupo se toman del inventario y no de la
+                # foto: si a un equipo le cambiaron de cliente esta manana, la
+                # tarta tiene que pintarlo donde esta ahora.
+                salida.append({
+                    **visto,
+                    "empresa": equipo.empresa,
+                    "grupo": equipo.grupo,
+                    "ip": equipo.ip,
+                })
+            else:
+                salida.append({
+                    "nombre": equipo.nombre, "ip": equipo.ip,
+                    "grupo": equipo.grupo, "empresa": equipo.empresa,
+                    "estado": "pendiente", "detalle": "", "intento": 0, "fin": "",
+                })
+        return salida
+
     def _estado_visible(self) -> dict:
         """El estado de la ejecucion, recortado al alcance de esta cuenta.
 
@@ -848,21 +937,24 @@ class Manejador(BaseHTTPRequestHandler):
         Por eso se recalculan sobre lo que si le corresponde.
         """
         datos = resumen(self.cfg.almacen.estado)
-        if self.usuario.alcance.todo:
-            return datos
-
-        # El estado guarda nombre y empresa por equipo: se filtra con eso, sin
-        # tener que cruzarlo con el inventario.
-        suyos = [
-            e for e in datos.get("equipos", [])
-            if self.usuario.alcance.puede_ver(e.get("empresa", ""), e.get("nombre", ""))
-        ]
+        suyos = self._equipos_del_estado(datos)
 
         def cuantos(estado):
             return sum(1 for e in suyos if e.get("estado") == estado)
 
         ok = cuantos("sin_cambios") + cuantos("cambio")
         fallidos = cuantos("fallo")
+        recalculado = {
+            "equipos": suyos,
+            "total": len(suyos),
+            "ok": ok,
+            "cambios": cuantos("cambio"),
+            "fallidos": fallidos,
+            "hechos": ok + fallidos,
+        }
+
+        if self.usuario.alcance.todo:
+            return {**datos, **recalculado}
 
         # Lista BLANCA, no negra. Antes se devolvia el archivo entero con unos
         # cuantos campos recalculados encima, y por ahi se colaban la duracion
@@ -871,12 +963,7 @@ class Manejador(BaseHTTPRequestHandler):
         # publicado por descuido; con una blanca, hay que anadirlo aqui a mano.
         return {
             "situacion": datos.get("situacion"),
-            "equipos": suyos,
-            "total": len(suyos),
-            "ok": ok,
-            "cambios": cuantos("cambio"),
-            "fallidos": fallidos,
-            "hechos": ok + fallidos,
+            **recalculado,
             # Sin historial de ejecuciones (son totales de la flota entera) ni
             # avisos del inventario (nombran equipos de otras empresas).
             "historial": [],
@@ -957,7 +1044,21 @@ class Manejador(BaseHTTPRequestHandler):
         equipos, _ = self._inventario_tolerante()
         actual = next((e for e in equipos if e.nombre == nombre), None)
         if actual is None:
-            self._error(404, f"No hay ningun equipo llamado '{nombre}'.")
+            # Dado de baja. NO es un error, y ensenar un 404 aqui es enganoso:
+            # sus respaldos siguen en el repositorio a proposito ("dar de baja
+            # es dejar de consultarlo, no perder lo que se sabia de el"), y de
+            # hecho se acaba de llegar desde Cambios, donde salen listados. Lo
+            # unico que ya no existe es la ficha del inventario, que es de
+            # donde sale la ruta de sus archivos.
+            #
+            # Se vuelve a Cambios diciendolo, que es de donde se venia y donde
+            # sus versiones se siguen viendo una a una.
+            log.info("Historial de '%s': ya no esta en el inventario", nombre)
+            self._redirigir("/cambios?ok=" + quote(
+                f"'{nombre}' ya no esta en el inventario, asi que no tiene ficha "
+                "con su historial. Sus respaldos siguen aqui: cada version es "
+                "una fila de esta tabla."
+            ))
             return
         if not self._alcanzable(actual):
             return
@@ -1126,6 +1227,7 @@ class Manejador(BaseHTTPRequestHandler):
                     self._consulta_lista("col"),
                     paginas.COLUMNAS_CAMBIOS, paginas.COLUMNAS_CAMBIOS_DEFECTO,
                 ),
+                aviso=self._consulta().get("ok", ""),
             )
         )
 
@@ -1178,6 +1280,9 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes/respaldar":
             if self._permite("ajustes"):
                 self._respaldar_ahora()
+        elif ruta == "/ajustes/identidades":
+            if self._permite("ajustes"):
+                self._identidades_masivo()
         elif ruta == "/ajustes/ssh":
             if self._permite("ajustes"):
                 self._ajustes_ssh()
@@ -1406,6 +1511,15 @@ class Manejador(BaseHTTPRequestHandler):
             self._error(400, " ".join(errores))
             return
         cerradas = self.ctx.sesiones.cerrar_usuario(nombre)
+        # El ultimo sondeo de nombres se guarda a nombre de quien lo lanzo, y
+        # se le ensena por ese nombre. Si la cuenta se borra y manana se crea
+        # otra igual para OTRO cliente, esa cuenta nueva heredaria el detalle
+        # del sondeo viejo: los nombres de los equipos de quien estaba antes.
+        # Un nombre de usuario no es una identidad estable; borrarlo tiene que
+        # llevarse lo que colgaba de el.
+        ultimo = identidades.ultimo()
+        if ultimo is not None and ultimo.quien == nombre and not ultimo.corriendo:
+            identidades.olvidar()
         log.info(
             "%s borro la cuenta '%s' (%d sesiones cerradas)",
             self.usuario.nombre, nombre, cerradas,
@@ -2038,6 +2152,19 @@ class Manejador(BaseHTTPRequestHandler):
             )
             return
 
+        # El guardian tiene que ir en los DOS sentidos. El sondeo de nombres se
+        # niega a arrancar con un ciclo en marcha; si aqui no se mirara lo
+        # contrario, bastaria lanzar el sondeo y pulsar este boton para provocar
+        # a mano justo lo que aquel evita: dos procesos reescribiendo el mismo
+        # inventario y el mismo repositorio.
+        if identidades.en_curso() is not None:
+            self._pintar_ajustes(
+                error="Se les esta preguntando el nombre a los routers, y ese "
+                      "trabajo tambien toca el inventario. Espera a que termine.",
+                codigo=409,
+            )
+            return
+
         if not pedir_ciclo(self.cfg, self.usuario.nombre):
             self._fondo_error(
                 "No se pudo dejar la peticion. Revisa que el servicio pueda "
@@ -2053,19 +2180,159 @@ class Manejador(BaseHTTPRequestHandler):
             "Se sigue en Estado."
         )
 
-    def _ajustes_ok(self, mensaje: str) -> None:
+    def _pintar_ajustes(self, mensaje: str = "", error: str = "",
+                        codigo: int = 200) -> None:
+        """La pantalla de ajustes, entera. TODOS los caminos pasan por aqui.
+
+        Antes cada camino llamaba a paginas.ajustes con su propia lista de
+        argumentos -siete sitios repitiendo los mismos seis-, y eso significa
+        que cualquier dato nuevo que necesite la pantalla hay que acordarse de
+        anadirlo en los siete. El que se olvide no da error: pinta la pagina
+        con el valor por defecto, o sea con el contador a cero o el bloque
+        vacio, que parece un estado y es un descuido.
+        """
         self._html(paginas.ajustes(
-            self.cfg, estado_programador(self.cfg), zona=self.ctx.zona,
-            sesion=self._para_pintar(self.usuario), mensaje=mensaje,
+            self.cfg,
+            # El recortado y no el crudo. Hoy la plantilla solo lee 'proxima' y
+            # 'ultima', asi que daria igual; pero ese diccionario lleva dentro
+            # 'ultimas', con el nombre de CADA equipo de la flota y el tamano
+            # del ultimo lote. El dia que alguien pinte una fila mas aqui, una
+            # cuenta que solo ve a un cliente se llevaria la lista entera.
+            self._programador_visible(),
+            zona=self.ctx.zona,
+            sesion=self._para_pintar(self.usuario),
+            mensaje=mensaje,
+            error=error,
             fondo=self._marca_fondo(),
-        ))
+            **self._contexto_identidades(),
+        ), codigo)
+
+    def _contexto_identidades(self) -> dict:
+        """Lo que sabe la pantalla sobre los nombres de los routers.
+
+        Las cuentas se sacan del inventario que ESTA CUENTA ve: a quien solo
+        alcanza a un cliente, el boton tiene que decirle a cuantos equipos
+        suyos va a preguntar, no a cuantos de la flota entera.
+        """
+        try:
+            equipos, _ = self._inventario_visible()
+        except ErrorInventario:
+            # Sin inventario legible no hay nada que sondear, pero tampoco es
+            # motivo para no poder abrir Ajustes: el resto de la pantalla
+            # (intervalo, acceso SSH, fondo) no depende de el.
+            equipos = []
+        mios = [e for e in equipos if self._edita(e)]
+        return {
+            "sondeo": self._sondeo_visible(),
+            "equipos_totales": len(mios),
+            "equipos_sin_nombre": sum(1 for e in mios if identidades.es_provisional(e)),
+        }
+
+    def _sondeo_visible(self) -> dict | None:
+        """El sondeo, pero solo si esta cuenta tiene algo que ver con el.
+
+        El sondeo es uno para todo el panel, y lo que lleva dentro son nombres
+        de equipos y cuentas de la flota. En un panel donde cada cuenta ve solo
+        a su cliente, ensenarselo a cualquiera con permiso de ajustes seria
+        contarle cuantos equipos tiene el proveedor y como se llaman los del
+        cliente de al lado. Lo ve quien lo lanzo, y quien alcanza a la flota
+        entera; para el resto es como si no existiera.
+        """
+        sondeo = identidades.ultimo()
+        if sondeo is None:
+            return None
+        if self.usuario.alcance.todo or sondeo.quien == self.usuario.nombre:
+            return sondeo.instantanea()
+        return None
+
+    def _identidades_masivo(self) -> None:
+        """Le pregunta el nombre a varios routers a la vez.
+
+        Es el boton de la ficha de un equipo, pero para la flota. Y por eso no
+        se puede hacer igual: preguntar a uno son dos segundos, preguntar a
+        trescientos -con los apagados agotando el timeout- son minutos, y de
+        eso no se entera nadie porque el navegador ya se ha rendido. Asi que
+        aqui solo se arranca; el trabajo lo hace identidades.py en segundo
+        plano y la pantalla lo va mirando.
+        """
+        if not self._editable("equipos.editar"):
+            return
+        campos = self._campos()
+        if campos is None:
+            return
+
+        alcance = campos.get("alcance", identidades.SOLO_SIN_NOMBRE)
+        if alcance not in identidades.ALCANCES:
+            alcance = identidades.SOLO_SIN_NOMBRE
+
+        # Mientras corre un ciclo NO. El programador es otro proceso y renombra
+        # los equipos sin nombre el mismo; los dos a la vez son dos escritores
+        # sobre el mismo inventario y el mismo repositorio de git, que es justo
+        # lo que este proyecto evita en todas partes. El cerrojo del panel no
+        # sirve aqui: no cruza el limite del proceso.
+        if estado_programador(self.cfg).get("corriendo"):
+            self._pintar_ajustes(
+                error="Ahora mismo hay un respaldo en marcha, y ese ciclo tambien "
+                      "renombra equipos. Espera a que termine y vuelve a darle.",
+                codigo=409,
+            )
+            return
+
+        if identidades.en_curso() is not None:
+            self._pintar_ajustes(
+                error="Ya se les esta preguntando. Abajo se ve como va."
+            )
+            return
+
+        equipos, _ = self._inventario_visible()
+        # Solo los que esta cuenta puede EDITAR: ver un equipo no da derecho a
+        # cambiarle el nombre, y el nombre es la ruta de su respaldo.
+        mios = [e for e in equipos if self._edita(e)]
+        objetivo = identidades.a_quien_preguntar(mios, alcance)
+        if not objetivo:
+            self._pintar_ajustes(
+                mensaje="No hay ningun equipo al que preguntarle: todos los que "
+                        "puedes editar ya tienen nombre propio."
+            )
+            return
+
+        sondeo = identidades.lanzar(
+            self.cfg, self.ctx.candado, self.ctx.hechos,
+            objetivo, self.usuario.nombre, alcance,
+            # El motivo entero de un rechazo puede nombrar equipos de otros
+            # clientes (un choque de nombres). Solo se cuenta entero a quien
+            # alcanza a la flota completa.
+            detallado=self.usuario.alcance.todo,
+        )
+        # La comprobacion de arriba mira y esta la cierra: entre las dos hay
+        # sitio para que otro gane la carrera. Dar por bueno el arranque seria
+        # decirle a esta persona "preguntando a 120 equipos" cuando no se
+        # arranco nada con su alcance, y dejarla mirando un bloque vacio.
+        if sondeo is None:
+            self._pintar_ajustes(
+                error="Otra persona acaba de lanzarlo. Espera a que termine."
+            )
+            return
+
+        log.info(
+            "%s pidio preguntar el nombre a %d equipo(s) (%s)",
+            self.usuario.nombre, len(objetivo), alcance,
+        )
+        self._anotar("identidades", f"{len(objetivo)} equipos ({alcance})")
+        self._pintar_ajustes(
+            mensaje=f"Preguntando a {len(objetivo)} equipo(s). "
+                    "Puedes irte de esta pantalla: sigue por su cuenta."
+        )
+
+    def _api_identidades(self) -> None:
+        """Como va el sondeo, para el JS de la pantalla de ajustes."""
+        self._json(self._sondeo_visible() or {"vacio": True})
+
+    def _ajustes_ok(self, mensaje: str) -> None:
+        self._pintar_ajustes(mensaje=mensaje)
 
     def _fondo_error(self, mensaje: str) -> None:
-        self._html(paginas.ajustes(
-            self.cfg, estado_programador(self.cfg), zona=self.ctx.zona,
-            sesion=self._para_pintar(self.usuario), error=mensaje,
-            fondo=self._marca_fondo(),
-        ), 400)
+        self._pintar_ajustes(error=mensaje, codigo=400)
 
     def _ajustes_ssh(self) -> None:
         """Cambia el usuario y la clave con los que se entra a los routers."""
@@ -2075,12 +2342,11 @@ class Manejador(BaseHTTPRequestHandler):
 
         usuario = campos.get("ssh_usuario", "").strip()
         if not usuario:
-            self._html(paginas.ajustes(
-                self.cfg, estado_programador(self.cfg), zona=self.ctx.zona,
-                sesion=self._para_pintar(self.usuario),
-                error="El usuario SSH no puede quedar vacio: sin el no se entra a ningun equipo.",
-                fondo=self._marca_fondo(),
-            ), 400)
+            self._pintar_ajustes(
+                error="El usuario SSH no puede quedar vacio: sin el no se entra "
+                      "a ningun equipo.",
+                codigo=400,
+            )
             return
 
         cambios = {"ssh_usuario": usuario}
@@ -2101,12 +2367,9 @@ class Manejador(BaseHTTPRequestHandler):
             "acceso_ssh",
             f"usuario '{usuario}'" + (", clave nueva" if clave else ""),
         )
-        self._html(paginas.ajustes(
-            self.cfg, estado_programador(self.cfg), zona=self.ctx.zona,
-            sesion=self._para_pintar(self.usuario),
-            mensaje="Acceso guardado. El programador lo usa en el siguiente ciclo.",
-            fondo=self._marca_fondo(),
-        ))
+        self._pintar_ajustes(
+            mensaje="Acceso guardado. El programador lo usa en el siguiente ciclo."
+        )
 
     def _ajustes(self) -> None:
         campos = self._campos()
@@ -2118,14 +2381,9 @@ class Manejador(BaseHTTPRequestHandler):
         except ValueError:
             intervalo = 0
         if intervalo < 1:
-            self._html(
-                paginas.ajustes(
-                    self.cfg, estado_programador(self.cfg),
-                    error="El intervalo tiene que ser un numero de minutos mayor que cero.",
-                    zona=self.ctx.zona, sesion=self._para_pintar(self.usuario),
-                    fondo=self._marca_fondo(),
-                ),
-                400,
+            self._pintar_ajustes(
+                error="El intervalo tiene que ser un numero de minutos mayor que cero.",
+                codigo=400,
             )
             return
 
@@ -2137,13 +2395,8 @@ class Manejador(BaseHTTPRequestHandler):
         })
         log.info("Ajustes cambiados desde el panel: intervalo %d min", intervalo)
         self._anotar("ajustes", f"intervalo {intervalo} min")
-        self._html(
-            paginas.ajustes(
-                self.cfg, estado_programador(self.cfg),
-                mensaje="Guardado. El programador lo recoge en el siguiente ciclo.",
-                zona=self.ctx.zona, sesion=self._para_pintar(self.usuario),
-                fondo=self._marca_fondo(),
-            )
+        self._pintar_ajustes(
+            mensaje="Guardado. El programador lo recoge en el siguiente ciclo."
         )
 
     def log_message(self, formato: str, *args) -> None:

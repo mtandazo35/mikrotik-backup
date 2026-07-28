@@ -987,6 +987,45 @@ Si el equipo dice llamarse como otro que ya está en el inventario, se queda con
 la IP y queda constancia en el log: dos equipos con el mismo nombre compartirían
 archivo en el repo y se pisarían los respaldos.
 
+### Preguntarle el nombre a toda la flota
+
+En **Ajustes** hay el mismo botón, pero para muchos equipos de golpe. Dos
+alcances: **solo los que se llaman como su IP** (lo normal después de una
+importación por Excel) o **todos**, que hace mandar al router por encima del
+nombre escrito a mano.
+
+Esto **no cabe en una petición HTTP** y esa es la razón de que exista
+`identidades.py` en vez de un puñado de líneas en `web.py`. Preguntarle a uno
+son dos segundos; a trescientos, con los apagados agotando su timeout, son
+minutos. El navegador se rinde antes y el manejador del panel corta a los 30
+segundos. Así que el botón solo **arranca** el trabajo: corre en un hilo aparte
+con el mismo paralelismo que los respaldos (`concurrencia`), y la pantalla lo
+mira por `/api/identidades` sin esperarlo. Se puede cerrar el navegador.
+
+Las tres reglas que no se pueden romper, y por qué:
+
+- **No se renombra a ciegas.** Cada nombre que llega de un router pasa por la
+  misma validación que un alta a mano. El choque más común es real: dos routers
+  de clientes distintos llamados los dos `MikroTik`.
+- **No se pierde el histórico.** Primero se mueve el archivo con `git mv` y solo
+  si eso sale bien se toca el CSV. Al revés, el inventario apuntaría a un
+  respaldo que no está.
+- **No se pierden las credenciales del equipo.** Renombrar cambia *un* campo.
+  Esto no era así: el renombrado automático llamaba a `validar_equipo` sin
+  pasarle `usuario`, `clave` ni `intervalo_minutos`, así que un router con clave
+  propia se quedaba sin ella el día que se renombraba solo, y **fallaba
+  autenticando en el ciclo siguiente** — un ciclo más tarde y en otro sitio, que
+  es la forma más cara de enterarse.
+
+Mientras el programador está en un ciclo, el botón **se niega**. No es prudencia:
+ese ciclo también renombra equipos, y son dos procesos distintos escribiendo el
+mismo CSV y el mismo repositorio de git. El candado del panel no cruza esa
+frontera.
+
+Por alcance, cada cuenta pregunta solo a los equipos que **puede editar**, y el
+avance solo lo ve quien lo lanzó o quien alcanza a la flota entera: el sondeo es
+uno para todo el panel, y lo que lleva dentro son nombres de equipos.
+
 ### Carga masiva por Excel
 
 Dar de alta trescientos equipos a mano no es un plan. `/importar` descarga una
@@ -1182,8 +1221,9 @@ forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
   arriba). Se ve qué cambió, no lo que dice.
 - **No tiene HTTPS propio, ni API REST, ni 2FA, ni recuperación de clave por
   correo.** Hay un `/api/estado` con el mismo JSON que pinta la pantalla de
-  estado, y nada más. Una clave olvidada se arregla desde el panel por otro
-  administrador, o con `--clave-usuario`.
+  estado y un `/api/identidades` con el avance del sondeo de nombres, y nada
+  más. Una clave olvidada se arregla desde el panel por otro administrador, o
+  con `--clave-usuario`.
 
 ### Antes de exponerlo
 
@@ -1206,9 +1246,10 @@ CDN, ni librerías de gráficas.
 monitor externo para saber que el proceso vive, y pedirle credenciales obligaría
 a repartir la clave del panel por cada sistema de monitoreo. No revela nada de la
 flota. `/fondo` también es abierta, por necesidad (ver arriba). Todo lo demás
-exige sesión: `/` redirige al formulario y `/api/estado` —el JSON crudo, si
-prefieres consumirlo desde otro sitio— responde **401** para que un script sepa
-que le falta login en vez de tragarse el HTML del login como si fuera el estado.
+exige sesión: `/` redirige al formulario y todo lo que cuelga de `/api/` —el
+JSON crudo, si prefieres consumirlo desde otro sitio— responde **401** para que
+un script sepa que le falta login en vez de tragarse el HTML del login como si
+fuera el estado.
 
 ---
 
@@ -1329,9 +1370,10 @@ python -m tests.test_paginas      # el HTML servido, bien formado (CSS, JS, esca
 python -m tests.test_web          # de donde viene la peticion y cuanto aguanta
 python -m tests.test_panel        # el panel levantado: cada formulario se envia
 python -m tests.test_imagen       # ajuste del fondo, metadatos y bombas de zip
+python -m tests.test_identidades  # el sondeo de nombres: credenciales e historial
 ```
 
-**1197 comprobaciones** entre los catorce archivos, todas en verde hoy. No
+**1277 comprobaciones** entre los quince archivos, todas en verde hoy. No
 requieren ningún equipo ni red: `test_device` levanta un socket local que
 acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
 MikroTik con la lista de direcciones puesta.
@@ -1355,10 +1397,11 @@ alguna vez con el servidor contestando 200.
 | `test_usuarios` | 259 |
 | `test_hechos` | 38 |
 | `test_device` | 43 |
-| `test_paginas` | 168 |
+| `test_paginas` | 185 |
 | `test_web` | 22 |
 | `test_imagen` | 23 |
-| `test_panel` | 36 |
+| `test_panel` | 52 |
+| `test_identidades` | 47 |
 
 ### Probar el flujo completo sin hardware
 

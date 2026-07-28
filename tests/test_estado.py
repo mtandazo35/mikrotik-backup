@@ -163,8 +163,8 @@ def main() -> None:
                   len(guardadas) == est.HISTORIAL_MAXIMO)
         comprobar("son las mas RECIENTES, no las primeras",
                   guardadas[0]["duracion"] > guardadas[-1]["duracion"])
-        comprobar("y el tope son 10, que es lo que cabe de un vistazo",
-                  est.HISTORIAL_MAXIMO == 10)
+        comprobar("y el tope son 5: mas filas iguales no se leen, se saltan",
+                  est.HISTORIAL_MAXIMO == 5)
 
         # 9. Concurrencia: las transiciones llegan desde los hilos del pool.
         ruta3 = base / "paralelo.json"

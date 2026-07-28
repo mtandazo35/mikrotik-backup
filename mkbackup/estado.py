@@ -36,14 +36,18 @@ LATIDO_SEGUNDOS = 5
 # Holgado respecto al latido: un servidor cargado puede retrasar el hilo, y
 # declarar "interrumpida" una ejecucion viva seria peor que tardar en notarlo.
 LATIDO_MAXIMO = 40
-# Ejecuciones anteriores que se conservan para ver la tendencia. Diez: es lo
-# que cabe en pantalla de un vistazo y lo que de verdad se mira. Con veinte, la
-# tabla se comia media pagina de Estado y las de abajo no las leia nadie; y como
-# esto se guarda en el mismo JSON que el estado en curso, que el panel lee cada
-# pocos segundos, cada fila de mas se paga en cada refresco.
+# Ejecuciones anteriores que se conservan para ver la tendencia. Cinco: con un
+# intervalo de una hora son las ultimas cinco horas, que es lo que se mira para
+# saber si algo se torcio hace poco. Y como esto se guarda en el mismo JSON que
+# el estado en curso, que el panel lee cada pocos segundos, cada fila de mas se
+# paga en cada refresco.
+#
+# Fueron veinte y luego diez. Diez seguian siendo diez filas casi identicas
+# ("1/1, 0 cambios, 18s") una debajo de otra: una tabla en la que todas las
+# filas dicen lo mismo no se lee, se salta entera.
 #
 # Para la tendencia a largo plazo estan los commits de git, que no caducan.
-HISTORIAL_MAXIMO = 10
+HISTORIAL_MAXIMO = 5
 # Cuanto se insiste en leer el estado cuando el archivo esta bloqueado. Solo
 # se gasta si hay colision de verdad: en el caso normal se acierta a la
 # primera y no se espera nada. Dos segundos es mucho mas de lo que dura un

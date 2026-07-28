@@ -227,6 +227,48 @@ def ejecutar_graficas() -> None:
         print((r.stderr or "").strip()[:400])
 
 
+def ejecutar_sondeo() -> None:
+    """Corre tests/sondeo.js: el bloque de avance de Ajustes se pinta o no.
+
+    Mismo motivo que las graficas: el <div id="sondeo"> esta siempre en el
+    HTML, vacio y oculto, asi que cualquier comprobacion sobre el HTML pasa
+    aunque el codigo que lo llena no exista. Y lo que se pierde ahi no es un
+    adorno: preguntarle el nombre a la flota tarda minutos, y sin avance el
+    boton parece averiado.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    print()
+    if not shutil.which("node"):
+        print("[ -- ] el sondeo no se ejecuta: no hay node (no es un fallo)")
+        return
+
+    html = pg.ajustes(
+        Config(), {"proxima": None, "ultima": None}, sesion=SESION,
+        equipos_totales=12, equipos_sin_nombre=4,
+    )
+    guiones = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    if not guiones:
+        comprobar("la pantalla de ajustes trae su JavaScript", False)
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        js = Path(tmp) / "ajustes.js"
+        js.write_text(guiones[0], encoding="utf-8")
+        r = subprocess.run(
+            ["node", str(Path(__file__).parent / "sondeo.js"), str(js)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    for linea in (r.stdout or "").splitlines():
+        if linea.startswith(("[OK  ]", "[FALLA]")):
+            print(linea)
+    if r.returncode != 0:
+        FALLOS.append("el avance del sondeo no se pinta")
+        print((r.stderr or "").strip()[:400])
+
+
 def main() -> None:
     revisadas = paginas_a_revisar()
     comprobar(f"se pintan las paginas del panel ({len(revisadas)})",
@@ -397,6 +439,7 @@ def main() -> None:
               "Cambios 1 a 4 de 4" in corto)
 
     ejecutar_graficas()
+    ejecutar_sondeo()
 
     print()
     if FALLOS:

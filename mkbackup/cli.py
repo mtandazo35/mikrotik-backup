@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import __version__, device, inventory
+from . import __version__, device, identidades, inventory
 from .config import Config, ErrorConfig
 from .device import ErrorEquipo, Resultado, TipoError, respaldar
 from .estado import CAMBIO, FALLO, SIN_CAMBIOS, Estado
@@ -290,7 +290,9 @@ def _respaldar_con_reintentos(
 
 
 def _es_provisional(equipo: Equipo) -> bool:
-    return equipo.nombre == equipo.ip
+    # La regla vive en identidades.py, que es donde la usa tambien el sondeo
+    # masivo del panel. Aqui se deja el nombre para no tocar las llamadas.
+    return identidades.es_provisional(equipo)
 
 
 def _identidad_reportada(resultado: Resultado, equipo: Equipo, cfg: Config) -> str:
@@ -347,15 +349,15 @@ def _renombrar_provisionales(
             # identidad viene del equipo, no de una persona, y puede chocar con
             # otro nombre del inventario. Dos equipos con el mismo nombre
             # comparten archivo en el repo y se pisan los respaldos.
-            nuevo, errores = inventory.validar_equipo(
-                nombre=identidad,
-                empresa=equipo.empresa,
-                ip=equipo.ip,
-                puerto=equipo.puerto,
-                grupo=equipo.grupo,
-                existentes=[e.nombre for e in equipos],
-                original=equipo.nombre,
-            )
+            #
+            # Va por identidades.renombrado y no por validar_equipo a pelo
+            # porque renombrar es cambiar UN campo, y aqui se estaban perdiendo
+            # tres: al no pasar usuario, clave e intervalo, el equipo salia con
+            # ellos en blanco. O sea que un router con credenciales propias, el
+            # dia que se le renombraba solo, se quedaba sin ellas y el ciclo
+            # siguiente fallaba autenticando. Un fallo que llega un ciclo tarde
+            # y en otro sitio no se relaciona nunca con el renombrado.
+            nuevo, errores = identidades.renombrado(equipo, identidad, equipos)
             if nuevo is None:
                 log.warning(
                     "%s: no se renombra a '%s': %s",

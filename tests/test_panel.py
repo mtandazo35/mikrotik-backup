@@ -24,6 +24,7 @@ Ejecutar:  python -m tests.test_panel
 
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -240,6 +241,158 @@ def main() -> None:
                       pl.recoger_peticion(panel.cfg) == panel.cfg.web.usuario)
             comprobar("y el panel dice que quedo pedido",
                       "pedido" in html.lower())
+
+            print("\n--- Preguntar el nombre a toda la flota ---")
+            from mkbackup import identidades
+
+            codigo, html = panel.pedir("/ajustes")
+            comprobar("la pantalla ofrece el boton masivo",
+                      'action="/ajustes/identidades"' in html)
+            comprobar("y avisa de lo que hace 'todos'",
+                      "se pierde" in html)
+
+            identidades.olvidar()
+            # Sin equipos provisionales no hay a quien preguntar, y eso se dice
+            # en vez de arrancar un sondeo vacio que parece que hizo algo.
+            codigo, html = panel.pedir(
+                "/ajustes/identidades", {"alcance": "provisionales"}
+            )
+            comprobar(f"sin candidatos contesta sin arrancar nada (dio {codigo})",
+                      codigo == 200 and "No hay ningun equipo" in html)
+            comprobar("y no dejo ningun sondeo", identidades.ultimo() is None)
+
+            # Un alcance inventado desde fuera no puede convertirse en "todos":
+            # eso renombraria la flota entera de quien solo pedia los sin nombre.
+            codigo, html = panel.pedir(
+                "/ajustes/identidades", {"alcance": "; rm -rf /"}
+            )
+            comprobar(f"un alcance inventado cae en el prudente (dio {codigo})",
+                      codigo == 200 and "No hay ningun equipo" in html)
+
+            codigo, html = panel.pedir("/ajustes/identidades", {"alcance": "todos"})
+            comprobar(f"con 'todos' arranca (dio {codigo})", codigo == 200)
+            comprobar("y lo dice", "Preguntando a 1" in html)
+            sondeo = identidades.ultimo()
+            comprobar("queda un sondeo registrado", sondeo is not None)
+            comprobar("a nombre de quien le dio",
+                      sondeo is not None and sondeo.quien == panel.cfg.web.usuario)
+
+            codigo, cuerpo = panel.pedir("/api/identidades")
+            comprobar(f"el JSON del avance se sirve (dio {codigo})", codigo == 200)
+            comprobar("y trae las cuentas", '"total": 1' in cuerpo.replace("\n", ""))
+
+            # El equipo apunta a una IP que no contesta: el sondeo acaba solo.
+            limite = time.monotonic() + 30
+            while sondeo is not None and sondeo.corriendo and time.monotonic() < limite:
+                time.sleep(0.05)
+            comprobar("termina solo, sin dejar el hilo colgado",
+                      sondeo is not None and not sondeo.corriendo)
+            comprobar("y el equipo que no contesto se queda como estaba",
+                      "Equipo-Uno" in Path(panel.cfg.inventario).read_text(
+                          encoding="utf-8"))
+
+            # Mientras el programador esta en un ciclo NO se puede lanzar: son
+            # dos procesos escribiendo el mismo inventario y el mismo repo.
+            identidades.olvidar()
+            import json as _json
+
+            marca = pl.ruta_programador(panel.cfg)
+            marca.write_text(_json.dumps({"corriendo": True}), encoding="utf-8")
+            codigo, html = panel.pedir("/ajustes/identidades", {"alcance": "todos"})
+            comprobar(f"con un respaldo en marcha se niega (dio {codigo})",
+                      codigo == 409)
+            comprobar("explicando por que", "respaldo en marcha" in html)
+            comprobar("y sin arrancar nada", identidades.ultimo() is None)
+            marca.unlink(missing_ok=True)
+
+            print("\n--- Estado cuenta la flota de AHORA, no la del ultimo ciclo ---")
+            # El archivo de estado es la foto del ultimo ciclo. Entre ese ciclo
+            # y ahora la flota cambia, y el panel enseñaba la foto: se daba de
+            # baja un equipo y Estado seguia contandolo (y pintandolo en la
+            # tabla y en las tartas) durante horas, hasta el siguiente ciclo.
+            # Con un solo equipo, el panel decia "1 equipo, 1 respaldado" de un
+            # router que ya no existia.
+            import json as _js
+
+            Path(panel.cfg.almacen.estado).write_text(_js.dumps({
+                "inicio": "2026-07-27T10:00:00+00:00",
+                "fin": "2026-07-27T10:00:18+00:00", "terminada": True,
+                "total": 1, "ok": 1, "cambios": 0, "fallidos": 0,
+                "equipos": [{"nombre": "Fantasma", "ip": "10.20.0.77",
+                             "grupo": "core", "empresa": "Empresa Uno",
+                             "estado": "sin_cambios", "detalle": "",
+                             "intento": 1, "fin": ""}],
+                "historial": [],
+            }), encoding="utf-8")
+
+            codigo, cuerpo = panel.pedir("/api/estado")
+            datos = _js.loads(cuerpo)
+            nombres = [e["nombre"] for e in datos.get("equipos", [])]
+            comprobar(f"un equipo que ya no esta en el inventario desaparece "
+                      f"({nombres})", "Fantasma" not in nombres)
+            comprobar("y deja de contar en el total",
+                      datos.get("total") == len(nombres))
+            comprobar("los que si estan salen, aunque el ciclo no los tocara",
+                      "Equipo-Uno" in nombres)
+            uno = next((e for e in datos["equipos"] if e["nombre"] == "Equipo-Uno"),
+                       {})
+            comprobar("y salen como pendientes, que es lo que son",
+                      uno.get("estado") == "pendiente")
+            comprobar("sin contarse como respaldados", datos.get("ok") == 0)
+            Path(panel.cfg.almacen.estado).unlink(missing_ok=True)
+
+            print("\n--- El historial de un equipo dado de baja ---")
+            # Dar de baja NO borra los respaldos: siguen saliendo en Cambios, y
+            # desde ahi se llega a "Todas las versiones". Ese boton buscaba la
+            # ficha en el inventario y contestaba 404 sobre un equipo cuyos
+            # datos estan delante: un error donde no hay ningun error.
+            panel.pedir("/equipos/nuevo", {**EQUIPO_MUDO, "nombre": "Equipo-Baja",
+                                           "ip": "10.20.0.9", "puerto": "22"})
+            panel.pedir("/equipos/baja", {"nombre": "Equipo-Baja"})
+            codigo, cuerpo = panel.pedir("/historial?equipo=Equipo-Baja")
+            comprobar(f"no contesta 404 (dio {codigo})", codigo != 404)
+            comprobar("vuelve a Cambios, que es de donde se venia",
+                      codigo == 303 or "/cambios" in cuerpo)
+
+            codigo, html = panel.pedir(
+                "/cambios?ok=" + urllib.parse.quote("Equipo-Baja ya no esta"))
+            comprobar(f"y Cambios explica por que (dio {codigo})", codigo == 200)
+            comprobar("con el aviso a la vista",
+                      "Equipo-Baja ya no esta" in html)
+
+            print("\n--- Un error no deja el cuerpo del POST en el socket ---")
+            # Casi todos los caminos de error cortan ANTES de leer el cuerpo:
+            # "no tienes permiso", "solo lectura", "esa pagina no existe". Con
+            # keep-alive, esos bytes sin leer los interpreta la peticion
+            # SIGUIENTE como su primera linea, y la conexion se cae a la mitad
+            # mientras el registro dice que se contesto bien. Ya paso una vez.
+            import socket
+
+            cuerpo = urllib.parse.urlencode({"relleno": "x" * 500}).encode()
+            crudo = (
+                b"POST /no-existe HTTP/1.1\r\nHost: x\r\n"
+                + f"Cookie: {panel.cookie}\r\n".encode()
+                + b"Content-Type: application/x-www-form-urlencoded\r\n"
+                + f"Content-Length: {len(cuerpo)}\r\n\r\n".encode()
+                + cuerpo
+            )
+            s = socket.create_connection(
+                ("127.0.0.1", panel.srv.server_address[1]), timeout=10)
+            try:
+                s.sendall(crudo)
+                respuesta = b""
+                while b"\r\n\r\n" not in respuesta and len(respuesta) < 8192:
+                    trozo = s.recv(4096)
+                    if not trozo:
+                        break
+                    respuesta += trozo
+            finally:
+                s.close()
+            cabeceras = respuesta.split(b"\r\n\r\n", 1)[0].lower()
+            comprobar("el error contesta 404", b" 404 " in respuesta[:32])
+            comprobar("y cierra la conexion, para que esos bytes no los lea "
+                      "la peticion siguiente",
+                      b"connection: close" in cabeceras)
 
             print("\n--- Y lo que no existe no tumba nada ---")
             for ruta in ("/no-existe", "/equipos/../../etc/passwd", "/equipos/"):

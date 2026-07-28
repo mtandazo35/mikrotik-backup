@@ -87,7 +87,10 @@ for (const id of listas) {
 
 // --- Los recuadros ---------------------------------------------------------
 const cifras = nodos["cifras"] ? nodos["cifras"].innerHTML : "";
-for (const etiqueta of ["Clientes", "Equipos", "Respaldados", "Fallidos",
+// "Empresas" y no "Clientes": es como se llama ese campo en el alta, en la
+// columna de la tabla y en el filtro. Dos palabras para la misma cosa obligan
+// a adivinar que cuenta el recuadro.
+for (const etiqueta of ["Empresas", "Equipos", "Respaldados", "Fallidos",
                         "Proximo ciclo"]) {
   comprobar(`el recuadro "${etiqueta}" esta`, cifras.includes(`>${etiqueta}<`));
 }
