@@ -564,6 +564,22 @@ class Manejador(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802  (lo impone http.server)
         ruta = urlparse(self.path).path.rstrip("/") or "/"
 
+        # Abierta sin sesion, y hace falta que lo este: es la hoja de estilos de
+        # la propia pantalla de entrada, donde todavia no hay sesion que valga.
+        # No dice nada de la flota, es el mismo CSS para todo el mundo.
+        #
+        # Se cachea un ano. Eso solo se puede hacer porque la direccion lleva la
+        # huella del contenido (ver paginas.MARCA_ESTILO): si el CSS cambia,
+        # cambia la direccion, y la version vieja deja de pedirse. Sin esa
+        # huella, cachear seria condenar a quien ya entro a no ver nunca un
+        # arreglo de estilos.
+        if ruta == "/estilo.css":
+            self._responder(
+                paginas.ESTILO.encode("utf-8"), "text/css; charset=utf-8", 200,
+                [("Cache-Control", "public, max-age=31536000, immutable")],
+            )
+            return
+
         # Abierta sin sesion y a proposito: es la ruta que mira un monitor
         # externo para saber si el proceso vive. No dice nada de la flota, solo
         # que el panel responde; pedirle credenciales obligaria a repartirlas

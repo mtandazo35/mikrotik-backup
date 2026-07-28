@@ -186,6 +186,10 @@ def cargar(ruta: str | Path, puerto_defecto: int = 22) -> tuple[list[Equipo], li
 
     equipos: list[Equipo] = []
     avisos: list[str] = []
+    # Filas de datos que decian ALGO: ni vacias ni comentarios. Sirve para poder
+    # distinguir "el archivo esta vacio" de "el archivo tiene filas y ninguna
+    # vale", que son dos situaciones muy distintas (ver el final de la funcion).
+    filas_leidas = 0
     vistos: dict[str, str] = {}
     # slug de empresa -> primer nombre legible que lo produjo, para detectar
     # dos empresas distintas que terminarian compartiendo carpeta.
@@ -221,6 +225,8 @@ def cargar(ruta: str | Path, puerto_defecto: int = 22) -> tuple[list[Equipo], li
                 continue  # fila vacia
             if nombre.startswith("#"):
                 continue  # comentario
+
+            filas_leidas += 1
 
             if not nombre or not ip:
                 avisos.append(f"L{n}: descartada, falta nombre o ip")
@@ -367,7 +373,18 @@ def cargar(ruta: str | Path, puerto_defecto: int = 22) -> tuple[list[Equipo], li
                 )
             )
 
-    if not equipos:
+    # Un inventario VACIO no es un error, y confundir las dos cosas se veia en
+    # pantalla: al dar de baja el ultimo equipo, el panel sacaba un recuadro de
+    # "avisos del inventario" diciendo que el archivo no contiene ningun equipo
+    # valido, como si estuviera roto. Estaba vacio, que es exactamente lo que
+    # deja quien acaba de instalar esto o quien acaba de borrar su ultimo
+    # router. Un aviso que sale cuando no pasa nada ensena a no leer los avisos.
+    #
+    # Lo que SI es un problema es un archivo CON filas de las que no se salva
+    # ninguna: ahi hay 40 lineas escritas y ni una sirve, y eso hay que decirlo
+    # y parar. La diferencia esta en filas_leidas, que no cuenta ni las lineas
+    # en blanco ni los comentarios.
+    if not equipos and filas_leidas:
         raise ErrorInventario(f"{ruta} no contiene ningun equipo valido")
 
     return equipos, avisos

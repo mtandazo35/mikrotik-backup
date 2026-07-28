@@ -489,6 +489,15 @@ def ejecutar(
         log.error("Inventario: %s", exc)
         return 2
 
+    # Un inventario vacio ya no es un error de carga (ver inventory.cargar), asi
+    # que hay que decidir aqui que hacer con el. No hay nada que respaldar y
+    # tampoco nada roto: es el estado de quien acaba de instalar esto. Se sale
+    # con 0 y sin tocar el estado ni git, igual que cuando los equipos pedidos
+    # se dieron de baja entre la decision y el ciclo.
+    if not equipos:
+        log.info("El inventario no tiene ningun equipo: no hay nada que respaldar")
+        return 0
+
     # Sin credenciales generales, solo se puede entrar a los equipos que traigan
     # las suyas. Si no hay ninguno asi, el ciclo entero seria 300 fallos de
     # autenticacion: se dice el motivo real UNA vez y no se toca ningun equipo.

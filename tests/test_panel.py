@@ -305,6 +305,38 @@ def main() -> None:
             comprobar("y sin arrancar nada", identidades.ultimo() is None)
             marca.unlink(missing_ok=True)
 
+            print("\n--- La hoja de estilos se sirve aparte y se cachea ---")
+            # Era el 89% de cada pagina (28 KB de 31) y viajaba entera en cada
+            # clic del paginador, con no-store, asi que el navegador no podia
+            # reutilizarla nunca. Aparte y cacheada, cambiar de pagina pasa de
+            # 31 KB a 3.
+            from mkbackup import paginas as _pg
+
+            pet = urllib.request.Request(panel.base + _pg.RUTA_ESTILO)
+            with panel._abrir(pet) as r:
+                css = r.read().decode("utf-8")
+                cabeceras = {k.lower(): v for k, v in r.headers.items()}
+            comprobar(f"la hoja se sirve ({len(css) // 1024} KB)",
+                      len(css) > 1000 and "--fondo" in css)
+            comprobar("con el tipo correcto",
+                      "text/css" in cabeceras.get("content-type", ""))
+            # Sin esto no se gana nada: seguiria bajandose en cada pagina.
+            cache = cabeceras.get("cache-control", "")
+            comprobar(f"y se puede cachear ({cache})",
+                      "max-age=" in cache and "no-store" not in cache)
+
+            # Se sirve SIN sesion a proposito: es el estilo de la propia
+            # pantalla de entrada, donde todavia no hay sesion que valga.
+            sin_galleta = urllib.request.Request(panel.base + "/estilo.css")
+            with panel._abrir(sin_galleta) as r:
+                comprobar("y sin pedir login, que es el estilo del propio login",
+                          r.status == 200)
+
+            codigo, html = panel.pedir("/cambios")
+            comprobar(f"y las paginas ya no la llevan dentro "
+                      f"({len(html) // 1024} KB)",
+                      "<style" not in html and len(html) < 12 * 1024)
+
             print("\n--- Estado cuenta la flota de AHORA, no la del ultimo ciclo ---")
             # El archivo de estado es la foto del ultimo ciclo. Entre ese ciclo
             # y ahora la flota cambia, y el panel enseñaba la foto: se daba de

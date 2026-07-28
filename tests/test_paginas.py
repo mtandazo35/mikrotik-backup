@@ -270,6 +270,39 @@ def ejecutar_sondeo() -> None:
 
 
 def main() -> None:
+    # --- La hoja de estilos, una vez y de verdad ---------------------------
+    # Esto se comprobaba antes pagina por pagina, leyendo el <style> de dentro.
+    # Al sacar el CSS a su propio archivo, aquella comprobacion se habria
+    # quedado sin nada que mirar y habria seguido en verde para siempre sin
+    # revisar una sola llave. Ahora se mira la hoja directamente, que es donde
+    # esta: una llave de mas apaga media hoja de estilos y el navegador no
+    # avisa de nada.
+    css = _sin_comentarios_css(pg.ESTILO)
+    abre, cierra = css.count("{"), css.count("}")
+    comprobar(f"las llaves de la hoja de estilos cuadran ({abre}/{cierra})",
+              abre == cierra)
+    profundidad, se_paso = 0, False
+    for c in css:
+        profundidad += (c == "{") - (c == "}")
+        se_paso = se_paso or profundidad < 0
+    comprobar("ninguna llave de la hoja cierra antes de tiempo", not se_paso)
+
+    # La huella sale del contenido: si cambia el CSS tiene que cambiar la
+    # direccion, o quien ya entro se queda con la version vieja cacheada un ano.
+    marca_ahora = pg.MARCA_ESTILO
+    original = pg.ESTILO
+    try:
+        pg.ESTILO = original + "\n.probando { color: red; }\n"
+        import importlib
+
+        importlib.reload(pg)
+        comprobar("la direccion de la hoja lleva su huella",
+                  pg.MARCA_ESTILO in pg.RUTA_ESTILO and len(pg.MARCA_ESTILO) >= 8)
+    finally:
+        importlib.reload(pg)
+    comprobar(f"y la huella se calcula del contenido ({marca_ahora})",
+              pg.MARCA_ESTILO == marca_ahora)
+
     revisadas = paginas_a_revisar()
     comprobar(f"se pintan las paginas del panel ({len(revisadas)})",
               len(revisadas) >= 10)
@@ -289,18 +322,15 @@ def main() -> None:
             comprobar(f"{nombre}: el script va DENTRO del body",
                       texto.index("<script") < texto.index("</body>"))
 
-        # --- CSS: una llave de mas apaga media hoja ------------------------
-        css = _sin_comentarios_css("\n".join(_bloques(texto, "style")))
-        if css.strip():
-            abre, cierra = css.count("{"), css.count("}")
-            comprobar(f"{nombre}: las llaves del CSS cuadran ({abre}/{cierra})",
-                      abre == cierra)
-            profundidad, se_paso = 0, False
-            for c in css:
-                profundidad += (c == "{") - (c == "}")
-                se_paso = se_paso or profundidad < 0
-            comprobar(f"{nombre}: ninguna llave del CSS cierra antes de tiempo",
-                      not se_paso)
+        # --- La hoja de estilos se enlaza, no se copia dentro ---------------
+        # Va aparte para que el navegador la cachee: era el 89% de cada pagina
+        # y se reenviaba en cada clic del paginador. Se comprueba que ninguna
+        # pagina vuelva a llevarla dentro, porque el dia que alguien reponga un
+        # <style> ahi, esa pagina deja de aprovechar la cache y nadie lo nota.
+        comprobar(f"{nombre}: enlaza la hoja de estilos",
+                  '<link rel="stylesheet" href="/estilo.css?v=' in texto)
+        comprobar(f"{nombre}: y no la lleva copiada dentro",
+                  "<style" not in texto)
 
         # --- JS: un const repetido arriba deja la pagina en blanco ---------
         for i, js in enumerate(_bloques(texto, "script")):
@@ -351,28 +381,46 @@ def main() -> None:
     # pero lo que se ve al abrir es un formulario descolgado en una esquina,
     # que parece un fallo de maquetacion. Con fondo y sin el, va centrado.
     print()
-    for nombre, html_login in (("sin fondo", pg.login()),
-                               ("con imagen de fondo", pg.login(fondo="abc123")),
-                               ("con error", pg.login(error="Clave incorrecta")),
-                               ("con fondo y error",
-                                pg.login(error="Clave incorrecta", fondo="abc123"))):
-        estilos = "\n".join(_bloques(html_login, "style"))
-        # justify-items: start / end / left / right en el body es lo que la
-        # descuelga. Se busca cualquiera de ellos.
-        descolgada = re.search(
-            r"justify-items\s*:\s*(start|end|left|right|flex-start|flex-end)",
-            estilos)
-        comprobar(f"login {nombre}: la tarjeta no se descuelga a un lado "
-                  f"({descolgada.group(0) if descolgada else 'centrada'})",
-                  descolgada is None)
-        comprobar(f"login {nombre}: hay un centrado explicito",
-                  re.search(r"(justify-items\s*:\s*center|place-items\s*:\s*center)",
-                            estilos) is not None)
-        # Un relleno lateral muy grande centra "dentro de una caja corrida", que
-        # a ojo se ve igual de torcido que un justify-items: start.
-        laterales = re.findall(r"padding:\s*[^;]*clamp\([^)]*vw[^)]*\)", estilos)
-        comprobar(f"login {nombre}: ni un relleno lateral que lo desplace "
-                  f"{laterales[:1] or ''}", not laterales)
+    # Las reglas ya no van dentro de la pagina: viven en la hoja compartida
+    # para poder cachearse. Se miran ALLI, que es donde estan ahora; leerlas del
+    # HTML dejaria esta comprobacion sin nada que revisar y en verde para
+    # siempre, que es peor que no tenerla.
+    entrada = "\n".join(
+        re.findall(r"body\.entrada[^{]*\{[^}]*\}", _sin_comentarios_css(pg.ESTILO))
+    )
+    comprobar(f"la hoja trae las reglas de la pantalla de entrada "
+              f"({len(entrada)} caracteres)", bool(entrada.strip()))
+    # justify-items: start / end / left / right en el body es lo que la
+    # descuelga. Se busca cualquiera de ellos.
+    descolgada = re.search(
+        r"justify-items\s*:\s*(start|end|left|right|flex-start|flex-end)", entrada)
+    comprobar(f"login: la tarjeta no se descuelga a un lado "
+              f"({descolgada.group(0) if descolgada else 'centrada'})",
+              descolgada is None)
+    comprobar("login: hay un centrado explicito",
+              re.search(r"(justify-items\s*:\s*center|place-items\s*:\s*center)",
+                        entrada) is not None)
+    # Un relleno lateral muy grande centra "dentro de una caja corrida", que a
+    # ojo se ve igual de torcido que un justify-items: start.
+    laterales = re.findall(r"padding:\s*[^;]*clamp\([^)]*vw[^)]*\)", entrada)
+    comprobar(f"login: ni un relleno lateral que lo desplace {laterales[:1] or ''}",
+              not laterales)
+
+    # Y que la pagina active esas reglas: la hoja puede estar impecable y no
+    # servir de nada si el body no lleva la clase que las engancha.
+    for nombre, html_login, con_fondo in (
+        ("sin fondo", pg.login(), False),
+        ("con imagen de fondo", pg.login(fondo="abc123"), True),
+        ("con error", pg.login(error="Clave incorrecta"), False),
+        ("con fondo y error", pg.login(error="Clave incorrecta", fondo="abc123"),
+         True),
+    ):
+        comprobar(f"login {nombre}: el body engancha las reglas de entrada",
+                  'class="entrada' in html_login)
+        comprobar(f"login {nombre}: la imagen de fondo "
+                  f"{'se pone' if con_fondo else 'no se pone'}",
+                  ("con-fondo" in html_login and "--fondo-login:url" in html_login)
+                  == con_fondo)
 
     # --- Las graficas del panel, las dos formas -----------------------------
     # Las tartas se quitaron una vez en un rediseno y hubo que devolverlas.

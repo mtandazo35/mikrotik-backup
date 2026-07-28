@@ -19,6 +19,7 @@ de un problema.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -676,7 +677,76 @@ ESTILO = """
   @media (min-width: 1600px) {
     .contenedor { max-width: 1280px; }
   }
+
+  /* --- Pantalla de entrada ---
+     Vive aqui, en la hoja compartida, y no dentro de su pagina. Lo unico que
+     cambia de una entrada a otra es CUAL es la imagen de fondo, y eso viaja
+     como una variable en el propio body; las reglas son siempre las mismas, o
+     sea que se cachean como todo lo demas.
+
+     Todo va colgado de .entrada para que estas reglas no toquen al resto del
+     panel: son selectores de elemento (body, form, button) y sueltos en la
+     hoja se aplicarian a todas las paginas. */
+  body.entrada { display: grid; place-items: center; padding: 1.5rem;
+                 /* dvh y no vh: en el movil, vh cuenta la barra del navegador
+                    aunque este visible, asi que la tarjeta queda descentrada
+                    justo en la pantalla mas pequena. vh queda antes como
+                    reserva para navegadores viejos. */
+                 min-height: 100vh; min-height: 100dvh; }
+  body.entrada form { background: var(--panel); border: 1px solid var(--borde);
+                      border-radius: var(--radio); box-shadow: var(--sombra);
+                      padding: 1.75rem; width: 100%; max-width: 340px; }
+  body.entrada button { width: 100%; }
+
+  /* Con imagen de fondo. La imagen la pone --fondo-login, que la escribe la
+     pagina; si no hay ninguna, esta regla no se activa. */
+  body.entrada.con-fondo {
+    background-image:
+      /* Un velo oscuro DEBAJO de la tarjeta y encima de la foto. Sin el, el
+         formulario queda sobre lo que toque de la imagen y que se lea depende
+         de la suerte. Es parejo y no un degradado lateral: con la tarjeta en el
+         centro, aclarar un lado solo servia para que la imagen cambiara de tono
+         de un borde al otro sin motivo. Mas oscuro hacia el centro, que es
+         donde esta el formulario, y mas claro en los bordes. */
+      radial-gradient(ellipse at center,
+        rgba(8,11,16,.86) 0%, rgba(8,11,16,.72) 45%, rgba(8,11,16,.42) 100%),
+      var(--fondo-login);
+    background-size: cover, cover;
+    background-position: center, center;
+    background-repeat: no-repeat, no-repeat;
+    justify-items: center;
+    padding: 2rem 1.5rem;
+  }
+  /* La tarjeta se queda opaca a proposito: nada de cristal esmerilado sobre una
+     foto con tanto detalle, que es donde el texto deja de leerse. */
+  body.entrada.con-fondo form { box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+  body.entrada.con-fondo h1,
+  body.entrada.con-fondo form p.sub { color: var(--texto); }
+
+  @media (max-width: 760px) {
+    body.entrada.con-fondo { padding: 1.5rem; }
+  }
 """
+
+
+# La hoja de estilos va en su PROPIO archivo y no dentro de cada pagina, y esto
+# es lo que se gano: de una pagina de Cambios de 31 KB, 28 eran el CSS. O sea
+# que el 89% de lo que se descargaba en cada clic del paginador era la misma
+# hoja de estilos otra vez, y encima el panel manda "Cache-Control: no-store"
+# en todo, asi que el navegador no podia reutilizarla nunca. Veinte clics eran
+# medio mega de CSS repetido para ensenar unas pocas filas de tabla.
+#
+# Sacada aparte, se pide UNA vez y se queda en la cache del navegador; a partir
+# de ahi, cambiar de pagina son 3 KB en vez de 31.
+#
+# La direccion lleva la huella del contenido, y eso es lo que permite cachearla
+# para siempre sin miedo: si el CSS cambia, cambia la huella, cambia la
+# direccion y el navegador se baja la nueva. Sin la huella habria que elegir
+# entre cachear (y que un arreglo de estilos no le llegue a nadie hasta que
+# vacie la cache) o no cachear (y volver al problema de arriba).
+MARCA_ESTILO = hashlib.sha256(ESTILO.encode("utf-8")).hexdigest()[:12]
+RUTA_ESTILO = f"/estilo.css?v={MARCA_ESTILO}"
+HOJA = f'<link rel="stylesheet" href="{RUTA_ESTILO}">'
 
 # Las secciones de la navegacion. La clave es la que se pasa como `activo`; la
 # ultima columna es el permiso que hace falta para verla. Una seccion que no se
@@ -754,7 +824,7 @@ def envoltura(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(titulo)}</title>
-<style>{ESTILO}</style>
+{HOJA}
 </head>
 <body>
 <div class="contenedor">
@@ -795,63 +865,25 @@ def login(error: str = "", fondo: str = "") -> str:
     # archivo. Va en la URL para que el navegador no siga sirviendo la imagen
     # vieja de su cache: la ruta es la misma, asi que sin esto una imagen
     # nueva no se ve hasta que caduque, y eso son 24 horas mirando la anterior.
-    estilo_fondo = ""
+    # Lo unico que cambia de una entrada a otra es CUAL es la imagen, asi que es
+    # lo unico que viaja en la pagina: la regla que la usa vive en la hoja
+    # compartida y se cachea con todo lo demas. La marca en la URL hace que el
+    # navegador no siga sirviendo la imagen vieja de su cache cuando se cambia:
+    # la ruta es la misma, y sin esto una imagen nueva no se ve hasta que
+    # caduque, que son 24 horas mirando la anterior.
+    clase, variable = "entrada", ""
     if fondo:
-        estilo_fondo = """
-  body {
-    background-image:
-      /* Un velo oscuro DEBAJO de la tarjeta y encima de la foto. Sin el, el
-         formulario queda sobre lo que toque de la imagen y que se lea depende
-         de la suerte. Ahora es parejo y no un degradado lateral: con la
-         tarjeta en el centro, aclarar un lado solo servia para que la imagen
-         cambiara de tono de un borde al otro sin motivo. Mas oscuro hacia el
-         centro, que es donde esta el formulario, y mas claro en los bordes,
-         donde la foto se ve entera. */
-      radial-gradient(ellipse at center,
-        rgba(8,11,16,.86) 0%, rgba(8,11,16,.72) 45%, rgba(8,11,16,.42) 100%),
-      url("/fondo?v=__V__");
-    background-size: cover, cover;
-    background-position: center, center;
-    background-repeat: no-repeat, no-repeat;
-    /* Centrada. Lo hereda del centrado general de esta pagina, pero se deja
-       escrito para que quede claro que aqui NO se cambia. */
-    justify-items: center;
-    padding: 2rem 1.5rem;
-  }
-  /* La tarjeta se queda opaca a proposito: nada de cristal esmerilado sobre
-     una foto con tanto detalle, que es donde el texto deja de leerse. */
-  form { box-shadow: 0 18px 50px rgba(0,0,0,.45); }
-  h1, form p.sub { color: var(--texto); }
-
-  @media (max-width: 760px) {
-    body { padding: 1.5rem; }
-  }
-"""
-        estilo_fondo = estilo_fondo.replace("__V__", esc(fondo))
+        clase = "entrada con-fondo"
+        variable = f" style=\"--fondo-login:url('/fondo?v={esc(fondo)}')\""
     return f"""<!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mkbackup - entrar</title>
-<style>{ESTILO}
-  /* El relleno de body es asimetrico en el resto del panel (deja aire abajo
-     para que la ultima tarjeta no quede pegada al borde). Aqui hay que
-     anularlo: centrar dentro de una caja con mas relleno abajo que arriba
-     deja la tarjeta por encima del centro real, y se nota.
-     dvh y no vh: en el movil, vh cuenta la barra del navegador aunque este
-     visible, asi que la tarjeta queda descentrada justo en la pantalla mas
-     pequena. Se deja vh antes como reserva para navegadores viejos. */
-  body {{ display: grid; place-items: center; padding: 1.5rem;
-         min-height: 100vh; min-height: 100dvh; }}
-  form {{ background: var(--panel); border: 1px solid var(--borde);
-         border-radius: var(--radio); box-shadow: var(--sombra);
-         padding: 1.75rem; width: 100%; max-width: 340px; }}
-  button {{ width: 100%; }}
-{estilo_fondo}
-</style>
+{HOJA}
 </head>
-<body>
+<body class="{clase}"{variable}>
 <form method="post" action="/entrar">
   <h1>{MARCA}<span>mkbackup</span></h1>
   <p class="sub" style="margin:.3rem 0 1.4rem">Panel de respaldos de RouterOS</p>
