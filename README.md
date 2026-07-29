@@ -18,10 +18,10 @@ Aquí está el **código**. Los respaldos de tus routers y tu configuración
 | [`mkbackup/`](mkbackup/) | El programa: el respaldo, el programador y el panel web |
 | [`tests/`](tests/) | Las pruebas. Se ejecutan sin ningún equipo ni red — ver [Pruebas](#pruebas) |
 | [`systemd/`](systemd/) | Las dos unidades: el programador y el panel |
+| [`nginx/`](nginx/) | El proxy con TLS que va delante del panel |
 | [`examples/`](examples/) | Un inventario de muestra para copiar |
 | [`config.example.yaml`](config.example.yaml) | La configuración comentada. Es el manual de cada opción |
 | [`install.sh`](install.sh) | El instalador para Debian. Volver a lanzarlo es la forma de actualizar |
-| [`.claude/`](.claude/) | Ajustes del asistente con el que se desarrolla esto. No hace falta para usarlo |
 
 Hay una descripción módulo a módulo en [Estructura](#estructura).
 
@@ -32,6 +32,23 @@ Hay una descripción módulo a módulo en [Estructura](#estructura).
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mtandazo35/mikrotik-backup/main/install.sh | bash
 ```
+
+Y si además quieres **abrirlo desde otra máquina**, con nginx y TLS delante
+puestos por el propio instalador:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtandazo35/mikrotik-backup/main/install.sh | MKBACKUP_TLS=1 bash
+```
+
+Eso instala nginx, genera un certificado firmado por sí mismo, redirige el
+puerto 80 al 443 y declara `127.0.0.1` como proxy de confianza —sin esto último
+el freno a la fuerza bruta y el registro de accesos dejan de servir, porque
+todas las peticiones parecerían venir del propio proxy—. Va **detrás de una
+variable y no por defecto** porque escribe en `/etc/nginx` y apaga el sitio de
+ejemplo de Debian: en una máquina que ya sirva otra cosa, hacerlo sin avisar
+sería tumbársela. El navegador avisará del certificado la primera vez; es
+normal, y la alternativa real no es un certificado de verdad sino HTTP en
+claro, por donde viajarían la clave del panel y el inventario entero.
 
 Para **Debian y derivados** (necesita `apt-get`) y **como root**: todo vive
 bajo `/root`, así que el instalador se niega si no lo eres.

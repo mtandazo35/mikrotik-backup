@@ -449,6 +449,13 @@ def main() -> None:
                       and "Equipo-Ido" in html)
             comprobar("y no ofrece borrar al que sigue de alta",
                       'value="empresa-uno/Equipo-Uno.rsc"' not in html)
+            # El nombre NO puede venir dentro del campo de confirmacion. Con el
+            # puesto como marcador de posicion se copia de un vistazo sin mirar
+            # cual es, y escribirlo a conciencia es lo unico que separa este
+            # boton de borrarle los respaldos al cliente de al lado.
+            comprobar("el nombre no viene metido en el campo de confirmacion",
+                      'placeholder="Equipo-Ido"' not in html
+                      and 'value="Equipo-Ido"' not in html)
 
             # Escribir mal el nombre es el unico freno que hay entre este boton
             # y perder los respaldos de otro. Tiene que parar de verdad.

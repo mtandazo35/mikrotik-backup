@@ -20,10 +20,9 @@ tests/.dns_simulado
 # asi que no tiene por que vivir en el repositorio.
 /local/
 
-# Ajustes de Claude Code. El compartido (.claude/settings.json) SI se sube: es
-# una lista corta de comandos de solo lectura que evita tener que aprobar la
-# bateria de pruebas una por una. El .local NO: son cientos de permisos de un
-# solo uso que se acumulan al ir dando a "permitir", pesa 70 KB y no le sirve a
-# nadie mas.
-/.claude/settings.local.json
-/.claude/*.tmp.*
+# Ajustes de Claude Code, el asistente con el que se desarrolla esto. Ya no se
+# suben: quien clona el repositorio viene a desplegar un respaldo de MikroTik, y
+# encontrarse una carpeta de herramientas de desarrollo como primera linea del
+# listado -antes que el codigo- es ruido en el sitio donde menos ayuda.
+# Siguen existiendo en local, solo que fuera de git.
+/.claude/

@@ -17,6 +17,11 @@ set -euo pipefail
 
 REPO="${MKBACKUP_REPO:-https://github.com/mtandazo35/mikrotik-backup.git}"
 RAMA="${MKBACKUP_RAMA:-main}"
+# La direccion desde la que se descarga este mismo script, para poder
+# escribirla en el resumen del final. Se compone del repositorio para que
+# apunte al de verdad si alguien instala desde un clon suyo.
+REPO_CRUDO="${REPO%.git}"
+REPO_CRUDO="${REPO_CRUDO/github.com/raw.githubusercontent.com}/$RAMA/install.sh"
 # La ruta NO es configurable, y es a proposito: config.example.yaml y las dos
 # unidades de systemd llevan /root/mkbackup escrito dentro. Ofrecer una
 # variable que no reescribe nada de eso dejaba el codigo en un sitio y los
@@ -225,6 +230,87 @@ for unidad in mkbackup mkbackup-web; do
   fi
 done
 
+# --- Proxy con TLS, si se pide ----------------------------------------------
+#
+# Se activa con MKBACKUP_TLS=1 y NO por defecto:
+#
+#   curl -fsSL .../install.sh | MKBACKUP_TLS=1 bash
+#
+# Es opt-in porque instala nginx, escribe en /etc/nginx y apaga el sitio de
+# ejemplo. Hacer eso sin avisar en una maquina que ya sirve otra cosa seria
+# tumbarsela, y este instalador se lanza con una tuberia desde internet: tiene
+# que hacer lo que dice y nada mas.
+#
+# El certificado se firma a si mismo, asi que el navegador avisara la primera
+# vez. Es lo que hay sin un dominio, y la comparacion honesta no es contra un
+# certificado de verdad sino contra HTTP en claro, que es la alternativa: por
+# aqui viajan la clave del panel y el inventario de toda la flota.
+TLS_PUESTO=""
+if [ "${MKBACKUP_TLS:-0}" = "1" ]; then
+  paso "Poniendo nginx con TLS por delante"
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >/dev/null \
+    || morir "no se pudo instalar nginx"
+
+  # El certificado solo se crea si NO hay uno. Regenerarlo en cada actualizacion
+  # cambiaria la huella y el navegador lo leeria como si alguien se estuviera
+  # metiendo en medio, que es justo el aviso que no debe perder significado.
+  mkdir -p /etc/nginx/tls
+  if [ ! -s /etc/nginx/tls/mkbackup.crt ] || [ ! -s /etc/nginx/tls/mkbackup.key ]; then
+    aviso "Generando un certificado firmado por si mismo (10 anos)"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout /etc/nginx/tls/mkbackup.key \
+      -out /etc/nginx/tls/mkbackup.crt \
+      -subj "/CN=$(hostname -f 2>/dev/null || hostname)" >/dev/null 2>&1 \
+      || morir "no se pudo generar el certificado"
+    chmod 600 /etc/nginx/tls/mkbackup.key
+  else
+    aviso "Ya habia certificado en /etc/nginx/tls: se deja el que hay"
+  fi
+
+  # Se guarda lo que hubiera para poder devolverlo si la configuracion nueva no
+  # valida. Dejar a alguien sin panel por una actualizacion no es aceptable.
+  RESPALDO_NGINX=""
+  if [ -f /etc/nginx/sites-available/mkbackup ]; then
+    RESPALDO_NGINX="/etc/nginx/sites-available/mkbackup.antes-$(date +%Y%m%d-%H%M%S)"
+    cp -a /etc/nginx/sites-available/mkbackup "$RESPALDO_NGINX"
+  fi
+
+  install -m 644 "$FUENTE/nginx/mkbackup.conf" /etc/nginx/sites-available/mkbackup
+  ln -sf /etc/nginx/sites-available/mkbackup /etc/nginx/sites-enabled/mkbackup
+  # El sitio de ejemplo de Debian escucha en el 80 como default_server, asi que
+  # se queda con todo lo que no case por nombre: con el puesto, el panel no se
+  # ve y parece que el proxy no funciona.
+  rm -f /etc/nginx/sites-enabled/default
+
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    TLS_PUESTO="si"
+    aviso "nginx: en marcha"
+  else
+    rojo "    La configuracion de nginx no valida. Se deja como estaba."
+    nginx -t 2>&1 | sed 's/^/    /'
+    if [ -n "$RESPALDO_NGINX" ]; then
+      cp -a "$RESPALDO_NGINX" /etc/nginx/sites-available/mkbackup
+    else
+      rm -f /etc/nginx/sites-enabled/mkbackup
+    fi
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+  fi
+
+  # Sin esto, el freno a la fuerza bruta y el registro de accesos dejan de
+  # servir: todas las peticiones llegan desde el proxy, asi que mkbackup veria
+  # a todo el mundo como 127.0.0.1 -cinco fallos de cualquiera bloquearian a la
+  # empresa entera- y cada linea del registro diria esa misma direccion. Se toca
+  # solo si sigue con el valor de fabrica, para no pisar una lista puesta a mano.
+  if grep -q '^  proxies_de_confianza: \[\]$' "$DESTINO/config.yaml" 2>/dev/null; then
+    sed -i 's/^  proxies_de_confianza: \[\]$/  proxies_de_confianza: ["127.0.0.1"]/' \
+      "$DESTINO/config.yaml"
+    aviso "config.yaml: se declara 127.0.0.1 como proxy de confianza"
+    systemctl restart mkbackup-web.service
+  fi
+fi
+
 # --- Resumen ----------------------------------------------------------------
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
@@ -250,7 +336,13 @@ fi
 
 paso "Listo"
 
-verde "  Panel:  http://127.0.0.1:8080/"
+if [ -n "$TLS_PUESTO" ]; then
+  verde "  Panel:  https://${IP:-la-ip-de-esta-maquina}/"
+  aviso "El certificado se firma a si mismo: el navegador avisara la primera"
+  aviso "vez y hay que aceptarlo. Es normal."
+else
+  verde "  Panel:  http://127.0.0.1:8080/"
+fi
 if [ -n "$CLAVE" ]; then
   verde "  Usuario: admin"
   verde "  Clave:   $CLAVE"
@@ -267,8 +359,12 @@ cat <<FIN
        (seccion ssh:) o desde el panel, en Ajustes.
     2. Carga tus equipos en $DESTINO/inventory.csv, o desde el panel.
     3. El panel escucha solo en 127.0.0.1. Para verlo desde otra maquina,
-       ponle delante un proxy con TLS: habla HTTP en claro y la clave
-       viajaria legible. No lo abras con 0.0.0.0 sin eso.
+       vuelve a lanzar este instalador asi:
+
+         curl -fsSL $REPO_CRUDO | MKBACKUP_TLS=1 bash
+
+       Pone nginx delante con TLS. Sin eso el panel habla HTTP en claro y la
+       clave viajaria legible: no lo abras con 0.0.0.0 a pelo.
 
   Comprobar que va:   systemctl status mkbackup mkbackup-web
   Ver el registro:    journalctl -u mkbackup -f

@@ -2343,6 +2343,16 @@ def _bloque_datos(huerfanos, zona) -> str:
     <p class="sub">Ahora mismo no hay ninguno: de todo lo que hay guardado
        responde algun equipo dado de alta.</p>"""
 
+    # El nombre del equipo sale UNA vez, en su fila, y no se repite ni en la
+    # etiqueta ni dentro del campo. Escribirlo es lo unico que separa este boton
+    # de borrarle los respaldos al cliente de al lado, y para eso hay que
+    # LEERLO: con el nombre metido en el campo como marcador de posicion se
+    # copia de un vistazo sin mirar cual es, que es exactamente lo que la
+    # confirmacion existe para impedir.
+    #
+    # Y va en la fila y no en la etiqueta porque las etiquetas se pintan en
+    # mayusculas (ver el CSS de `label`), mientras que la comparacion distingue
+    # mayusculas de minusculas: el nombre tiene que verse tal cual se escribe.
     filas = []
     for h in huerfanos:
         # La ruta viaja en un campo oculto y no se compone en el servidor a
@@ -2373,9 +2383,11 @@ def _bloque_datos(huerfanos, zona) -> str:
                 </select>
               </div>
               <div class="campo">
-                <label for="conf-{ruta}">Escribe {nombre}</label>
+                <label for="conf-{ruta}">Escribe su nombre para confirmar</label>
                 <input id="conf-{ruta}" type="text" name="confirmacion" value=""
-                       autocomplete="off" placeholder="{nombre}">
+                       autocomplete="off" placeholder="tal cual sale arriba">
+                <div class="pista">Copialo de la fila de arriba, respetando
+                  mayusculas y minusculas.</div>
               </div>
               <button class="peligro" type="submit">Borrar sus datos</button>
             </form>
