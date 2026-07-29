@@ -715,6 +715,27 @@ class Usuarios:
                 if PERMISOS_FORMATO_3.issubset(set(permisos)):
                     self._roles[nombre] = sorted(set(permisos) | {"datos.mudanza"})
 
+            # Y la otra mitad, que es la que de verdad importa: a quien tenga
+            # EXCLUIDA el area de Ajustes hay que excluirle tambien lo nuevo.
+            #
+            # No basta con la traduccion asimetrica de _traducir, y por un
+            # motivo concreto: aquella vive en el bloque de formato < 3, o sea
+            # que solo toca archivos que vengan de un formato viejo. Un archivo
+            # que YA estaba en formato 3 -que es como lo dejo la version
+            # anterior, o sea el caso normal al actualizar- no pasa por ahi:
+            # sus permisos_menos ya son los ocho finos de Ajustes, escritos
+            # cuando 'datos.mudanza' no existia. El bloque de arriba le daba el
+            # permiso nuevo por su rol, la exclusion no se lo quitaba, y por
+            # HERENCIA recuperaba ademas la pantalla de Ajustes de la que le
+            # habian echado. Es exactamente el fallo que se queria cerrar,
+            # sobreviviendo en el unico caso que existe en produccion.
+            ajustes_finos = set(EQUIVALENCIAS["ajustes"])
+            for cuenta in cuentas:
+                if ajustes_finos.issubset(set(cuenta.permisos_menos or ())):
+                    cuenta.permisos_menos = sorted(
+                        set(cuenta.permisos_menos) | {"datos.mudanza"}
+                    )
+
         return cuentas
 
     def _roles_desde(self, datos) -> dict[str, list[str]]:
@@ -973,16 +994,22 @@ class Usuarios:
         if usuario is None:
             return set()
         base = set(roles.get(usuario.rol, ()))
-        efectivos = base | set(usuario.permisos_mas or ())
+        # Se traduce ANTES de restar, y los dos lados por separado. Hacerlo al
+        # reves -restar en crudo y traducir el resultado- dejaba sin efecto un
+        # permiso grueso guardado en las exclusiones: 'ajustes' en permisos_menos
+        # no coincidia con ninguno de los permisos finos del rol, asi que la
+        # resta no quitaba nada y la traduccion posterior ya no tenia de donde.
+        # El fallo caia siempre del lado permisivo, que es el que no se nota.
+        #
+        # Un permiso viejo guardado en el archivo se traduce aqui y no solo al
+        # migrar: entre que se actualiza el codigo y se reescribe el JSON hay un
+        # rato, y durante ese rato nadie puede quedarse fuera ni entrar de mas.
+        efectivos = _traducir(base | set(usuario.permisos_mas or ()))
         # permisos_menos se aplica AL FINAL y gana siempre, incluso sobre lo que
         # anade permisos_mas: quitar es la operacion segura, asi que ante un
-        # conflicto se queda lo restrictivo.
-        efectivos -= set(usuario.permisos_menos or ())
-        # Un permiso viejo guardado en el archivo (o en las excepciones de una
-        # cuenta) se traduce aqui tambien, y no solo al migrar el archivo: entre
-        # que se actualiza el codigo y se reescribe el JSON hay un rato, y
-        # durante ese rato nadie puede quedarse fuera.
-        efectivos = _traducir(efectivos)
+        # conflicto se queda lo restrictivo. Con al_quitar, ademas, quitar un
+        # area se lleva tambien lo que se le anadio despues (ver _traducir).
+        efectivos -= _traducir(usuario.permisos_menos or (), al_quitar=True)
         # Lo que no esta en PERMISOS se ignora en vez de reventar: el dia que se
         # retire un permiso, quien lo tuviera guardado tiene que seguir
         # cargando y entrando (ver el docstring del modulo).

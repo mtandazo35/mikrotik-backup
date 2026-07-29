@@ -1175,6 +1175,66 @@ def pruebas(carpeta: Path) -> None:
     comprobar("releer el archivo ya migrado a 4 no lo vuelve a tocar",
               ruta_v3v.read_text(encoding="utf-8") == texto_v4)
 
+    # 17 ter. El caso que de verdad se da al actualizar: un archivo que YA
+    # estaba en formato 3, con una cuenta a la que se le habia cerrado Ajustes.
+    #
+    # Aqui la traduccion asimetrica de _traducir NO ayuda, porque vive en el
+    # bloque de formato < 3 y este archivo no pasa por ahi. Sus permisos_menos
+    # ya son los ocho finos, escritos cuando 'datos.mudanza' no existia. Sin la
+    # segunda mitad de la migracion, el rol le daba el permiso nuevo, la
+    # exclusion no se lo quitaba y por HERENCIA recuperaba la pantalla entera.
+    # O sea: actualizar le devolvia a alguien un acceso que le habian retirado,
+    # y de propina la descarga de las credenciales de toda la flota.
+    ruta_cerrada = carpeta / "formato3-sin-ajustes.json"
+    ruta_cerrada.write_text(json.dumps({
+        "formato": 3,
+        "roles": {"admin": sorted(usr.PERMISOS_FORMATO_3)},
+        "usuarios": [
+            {"nombre": "jefe", "rol": "admin", "clave_hash": hash_bueno,
+             "creado": "", "ultimo_acceso": "",
+             "permisos_mas": [], "permisos_menos": sorted(AJUSTES_FINO),
+             "alcance": {"todo": True, "empresas": {}, "equipos": {}}},
+            {"nombre": "root", "rol": "admin", "clave_hash": hash_bueno,
+             "creado": "", "ultimo_acceso": "",
+             "permisos_mas": [], "permisos_menos": [],
+             "alcance": {"todo": True, "empresas": {}, "equipos": {}}},
+        ],
+    }, indent=2), encoding="utf-8")
+
+    cerrada = usr.Usuarios(ruta_cerrada, iteraciones=ITER)
+    permisos_jefe = cerrada.permisos(cerrada.obtener("jefe"))
+    comprobar("a quien tenia Ajustes cerrado NO se le da 'datos.mudanza' al "
+              "actualizar",
+              "datos.mudanza" not in permisos_jefe)
+    comprobar("y sigue sin poder abrir la pantalla de Ajustes",
+              "ajustes.ver" not in permisos_jefe)
+    comprobar("pero conserva lo demas que le daba su rol",
+              {"equipos.crear", "usuarios.editar"} <= permisos_jefe)
+    comprobar("y quien no tenia nada excluido si lo recibe",
+              "datos.mudanza" in cerrada.permisos(cerrada.obtener("root")))
+
+    # Un permiso GRUESO escrito a mano en las exclusiones tiene que quitar el
+    # area entera. Antes la resta se hacia sobre el conjunto sin traducir, asi
+    # que 'ajustes' no coincidia con ningun permiso fino del rol y la exclusion
+    # no quitaba absolutamente nada: fallaba del lado de conceder.
+    ruta_grueso = carpeta / "menos-grueso.json"
+    ruta_grueso.write_text(json.dumps({
+        "formato": usr.FORMATO,
+        "roles": {"admin": list(usr.PERMISOS)},
+        "usuarios": [
+            {"nombre": "jefe", "rol": "admin", "clave_hash": hash_bueno,
+             "creado": "", "ultimo_acceso": "",
+             "permisos_mas": [], "permisos_menos": ["ajustes"],
+             "alcance": {"todo": True, "empresas": {}, "equipos": {}}},
+        ],
+    }, indent=2), encoding="utf-8")
+    grueso = usr.Usuarios(ruta_grueso, iteraciones=ITER)
+    permisos_grueso = grueso.permisos(grueso.obtener("jefe"))
+    comprobar("un 'ajustes' grueso en permisos_menos cierra el area entera",
+              not (AJUSTES_FINO_AL_QUITAR & permisos_grueso))
+    comprobar("y no toca lo de las demas areas",
+              USUARIOS_FINO <= permisos_grueso)
+
     # 18. Archivo corrupto: nadie entra, nada se sobreescribe, todo se explica.
     roto, ruta_rota = nuevo(carpeta, "roto.json")
     roto.crear("jefe", "clave-larga-1", "admin")
