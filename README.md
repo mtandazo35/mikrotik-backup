@@ -7,6 +7,24 @@ mirarlo y gestionarlo.
 Pensado para una flota de ~300 RouterOS en un ISP que administra equipos de
 varios clientes.
 
+### Qué hay en este repositorio
+
+Aquí está el **código**. Los respaldos de tus routers y tu configuración
+**no viven aquí**: se quedan en tu servidor, bajo `/root/mkbackup` (ver
+[Instalación](#instalación-en-detalle)).
+
+| | Qué es |
+|---|---|
+| [`mkbackup/`](mkbackup/) | El programa: el respaldo, el programador y el panel web |
+| [`tests/`](tests/) | Las pruebas. Se ejecutan sin ningún equipo ni red — ver [Pruebas](#pruebas) |
+| [`systemd/`](systemd/) | Las dos unidades: el programador y el panel |
+| [`examples/`](examples/) | Un inventario de muestra para copiar |
+| [`config.example.yaml`](config.example.yaml) | La configuración comentada. Es el manual de cada opción |
+| [`install.sh`](install.sh) | El instalador para Debian. Volver a lanzarlo es la forma de actualizar |
+| [`.claude/`](.claude/) | Ajustes del asistente con el que se desarrolla esto. No hace falta para usarlo |
+
+Hay una descripción módulo a módulo en [Estructura](#estructura).
+
 ---
 
 ## ⚡ Instalación en una línea
