@@ -22,6 +22,7 @@ apunta a un puerto cerrado del propio 127.0.0.1.
 Ejecutar:  python -m tests.test_panel
 """
 
+import json
 import tempfile
 import threading
 import time
@@ -74,6 +75,7 @@ class Panel:
         self.cfg = cfg
         self.ctx = web.Contexto(cfg, Sesiones(
             duracion_horas=cfg.web.sesion_horas,
+            inactividad_minutos=cfg.web.sesion_minutos,
             intentos_max=cfg.web.intentos_max,
             bloqueo_segundos=cfg.web.bloqueo_segundos,
         ))
@@ -117,6 +119,33 @@ class Panel:
         except Exception as exc:  # noqa: BLE001
             return 0, f"{type(exc).__name__}: {exc}"
 
+    def pedir_crudo(self, ruta, datos=None):
+        """(codigo, cabeceras, bytes). Para lo que no es texto.
+
+        `pedir` decodifica a utf-8, que es lo comodo para HTML pero destroza un
+        .tar.gz: lo que vuelve no se parece a lo que se mando y no hay forma de
+        comprobar que el archivo descargado es de verdad un paquete.
+        """
+        # `cuerpo is not None` y no `if cuerpo`: un formulario sin campos se
+        # codifica como b"", que es falso, y la peticion se convertiria en un
+        # GET sin avisar. El de la copia del servidor es justo asi -un boton y
+        # ningun campo-, y el sintoma era un 404 que parecia una ruta mal
+        # escrita.
+        cuerpo = urllib.parse.urlencode(datos).encode() if datos is not None else None
+        pet = urllib.request.Request(
+            self.base + ruta, data=cuerpo,
+            method="POST" if cuerpo is not None else "GET",
+        )
+        if self.cookie:
+            pet.add_header("Cookie", self.cookie)
+        try:
+            with self._abrir(pet) as r:
+                return r.status, dict(r.headers), r.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+        except Exception as exc:  # noqa: BLE001
+            return 0, {}, f"{type(exc).__name__}: {exc}".encode()
+
     def entrar(self, usuario: str = "", clave: str = "") -> bool:
         datos = urllib.parse.urlencode(
             {"usuario": usuario or self.cfg.web.usuario, "clave": clave or self.CLAVE}
@@ -127,6 +156,10 @@ class Panel:
                 galleta = r.headers.get("Set-Cookie", "")
         except urllib.error.HTTPError as exc:
             galleta = exc.headers.get("Set-Cookie", "")
+        # Se guarda entera para poder mirarle los atributos: que la cookie NO
+        # lleve fecha de caducidad es lo que hace que cerrar el navegador cierre
+        # la sesion, y eso no se ve desde ningun otro sitio.
+        self.galleta = galleta
         self.cookie = galleta.split(";")[0] if galleta else ""
         return bool(self.cookie)
 
@@ -451,6 +484,156 @@ def main() -> None:
                       not archivo.exists())
             comprobar("y el panel dice que se puede recuperar",
                       "recuperar" in html)
+
+            print("\n--- La sesion muere al cerrar el navegador ---")
+            # Sin Max-Age ni Expires, el navegador borra la cookie al cerrarse.
+            # Con ellos, en un ordenador compartido el siguiente que abriera el
+            # panel entraba directamente como el anterior.
+            comprobar("la cookie de sesion no lleva Max-Age",
+                      "max-age" not in panel.galleta.lower())
+            comprobar("ni fecha de caducidad",
+                      "expires" not in panel.galleta.lower())
+            comprobar("pero si sigue siendo HttpOnly y SameSite=Strict",
+                      "HttpOnly" in panel.galleta
+                      and "SameSite=Strict" in panel.galleta)
+
+            print("\n--- Descargar la copia del servidor entero ---")
+            # Lo que sale por aqui es el sistema completo: el inventario con
+            # las claves de los routers, las cuentas del panel y el historico.
+            # Se comprueba que sale de verdad -no un HTML de error con nombre
+            # de .tar.gz-, que queda anotado, y sobre todo que el archivo
+            # temporal NO se queda en el disco: es una copia de las
+            # credenciales de la flota esperando a que alguien la encuentre.
+            import io
+            import tarfile
+
+            datos_dir = Path(panel.cfg.almacen.estado).parent
+
+            codigo, cabeceras, crudo_tar = panel.pedir_crudo("/ajustes/mudanza", {})
+            comprobar(f"la copia se descarga (dio {codigo})", codigo == 200)
+            comprobar("y viene como archivo adjunto .tar.gz",
+                      ".tar.gz" in cabeceras.get("Content-Disposition", "")
+                      and "attachment" in cabeceras.get("Content-Disposition", ""))
+            comprobar("con el tamano declarado y el que llega de acuerdo",
+                      cabeceras.get("Content-Length") == str(len(crudo_tar)))
+            comprobar("y no se queda en ninguna cache de disco",
+                      "no-store" in cabeceras.get("Cache-Control", ""))
+
+            dentro = []
+            manifiesto = {}
+            try:
+                with tarfile.open(fileobj=io.BytesIO(crudo_tar), mode="r:gz") as tar:
+                    dentro = tar.getnames()
+                    fuente = tar.extractfile("manifiesto.json")
+                    manifiesto = json.loads(fuente.read().decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                comprobar(f"el .tar.gz se abre ({exc})", False)
+
+            comprobar("lo descargado es un .tar.gz con su manifiesto dentro",
+                      manifiesto.get("programa") == "mkbackup")
+            # Las tres piezas sin las cuales mudarse no sirve de nada. Si
+            # alguna dejara de meterse, el paquete seguiria pareciendo correcto
+            # y el fallo solo se veria en el servidor nuevo, ya sin el viejo.
+            comprobar("lleva el inventario, las cuentas y el historico",
+                      "inventory.csv" in dentro and "usuarios.json" in dentro
+                      and any(n.startswith("configs.git/") for n in dentro))
+
+            # Se busca el temporal por su sufijo y no comparando el listado
+            # entero: la propia peticion escribe la linea de auditoria, asi que
+            # comparar "antes y despues" fallaria por el archivo del registro.
+            comprobar("no queda ningun paquete a medias en la carpeta de datos",
+                      not [x for x in datos_dir.iterdir()
+                           if x.name.endswith(".parcial")])
+
+            registro = Path(panel.cfg.almacen.auditoria).read_text(encoding="utf-8")
+            comprobar("y la descarga queda anotada en la auditoria",
+                      '"evento": "mudanza"' in registro)
+
+            print("\n--- Cargar una copia desde el panel ---")
+            # El otro sentido de la mudanza. Lo que se prueba es que el paso
+            # intermedio existe de verdad: subir NO restaura, solo dice que
+            # trae el paquete. Si subir restaurara directamente, elegir el
+            # archivo equivocado sustituiria la flota entera sin preguntar.
+            def subir(datos_tar, nombre="copia.tar.gz"):
+                frontera = "----prueba1234"
+                cuerpo_multi = (
+                    f"--{frontera}\r\n"
+                    f'Content-Disposition: form-data; name="archivo"; '
+                    f'filename="{nombre}"\r\n'
+                    "Content-Type: application/gzip\r\n\r\n"
+                ).encode() + datos_tar + f"\r\n--{frontera}--\r\n".encode()
+                pet = urllib.request.Request(
+                    panel.base + "/ajustes/mudanza/subir", data=cuerpo_multi,
+                    method="POST",
+                )
+                pet.add_header("Content-Type",
+                               f"multipart/form-data; boundary={frontera}")
+                pet.add_header("Cookie", panel.cookie)
+                try:
+                    with panel._abrir(pet) as r:
+                        return r.status, r.read().decode("utf-8", "replace")
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.read().decode("utf-8", "replace")
+
+            codigo, html = subir(crudo_tar)
+            comprobar(f"el paquete se sube (dio {codigo})", codigo == 200)
+            comprobar("y el panel dice de que servidor viene y de cuando",
+                      "Viene del servidor" in html and "Se hizo el" in html)
+            comprobar("pide escribir RESTAURAR para confirmar",
+                      "RESTAURAR" in html and 'name="confirmacion"' in html)
+            # Lo importante: subir NO ha tocado nada.
+            comprobar("subir todavia no ha restaurado nada",
+                      Path(panel.cfg.almacen.usuarios).is_file()
+                      and not list(Path(panel.cfg.almacen.estado).parent
+                                   .glob("*.antes-de-restaurar-*")))
+
+            vale = html.split('name="vale" value="')[1].split('"')[0]
+            comprobar("y deja un vale para el segundo paso", len(vale) == 32)
+
+            # Un archivo que no es un paquete de mkbackup se rechaza al subir,
+            # que es donde todavia no cuesta nada.
+            codigo, html = subir(b"esto no es un tar.gz", "cualquiera.tar.gz")
+            comprobar(f"un archivo que no es un paquete se rechaza (dio {codigo})",
+                      codigo == 400)
+
+            # Con la confirmacion mal escrita no se restaura.
+            codigo, html = panel.pedir(
+                "/ajustes/mudanza/restaurar",
+                {"vale": vale, "confirmacion": "restaurar"},
+            )
+            comprobar(f"en minusculas no vale (dio {codigo})", codigo == 400)
+            comprobar("y no se aparto nada",
+                      not list(Path(panel.cfg.almacen.estado).parent
+                               .glob("*.antes-de-restaurar-*")))
+
+            # Un vale inventado tampoco: es un nombre de archivo, y escribirle
+            # puntos y barras seria elegir cualquier cosa del disco.
+            codigo, _ = panel.pedir(
+                "/ajustes/mudanza/restaurar",
+                {"vale": "../../etc/passwd", "confirmacion": "RESTAURAR"},
+            )
+            comprobar(f"un vale con ruta dentro se rechaza (dio {codigo})",
+                      codigo == 400)
+
+            codigo, html = panel.pedir(
+                "/ajustes/mudanza/restaurar",
+                {"vale": vale, "confirmacion": "RESTAURAR"},
+            )
+            comprobar(f"con RESTAURAR bien escrito si restaura (dio {codigo})",
+                      codigo == 200)
+            comprobar("dice que hay que reiniciar los servicios",
+                      "reiniciar los servicios" in html)
+            comprobar("lo anterior quedo apartado y no borrado",
+                      list(Path(panel.cfg.almacen.estado).parent
+                           .glob("*.antes-de-restaurar-*")))
+            comprobar("y el paquete subido no se queda en el disco",
+                      not list(Path(panel.cfg.almacen.estado).parent
+                               .glob(".mudanza-subida-*")))
+            # Restaurar reemplaza el archivo de cuentas: las sesiones que
+            # habia dentro apuntan a usuarios que quiza ya no existen.
+            codigo, _ = panel.pedir("/equipos")
+            comprobar(f"y la sesion se ha cerrado (dio {codigo})",
+                      codigo in (303, 200) and panel.entrar())
 
             print("\n--- Un error no deja el cuerpo del POST en el socket ---")
             # Casi todos los caminos de error cortan ANTES de leer el cuerpo:

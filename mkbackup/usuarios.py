@@ -108,8 +108,9 @@ log = logging.getLogger("mkbackup.usuarios")
 #   2 -> roles como datos, permisos_mas/permisos_menos y alcance por usuario.
 #   3 -> permisos finos: 'ver', 'ajustes' y 'usuarios' se parten en uno por
 #        pantalla y por accion (ver PERMISOS y HERENCIA).
+#   4 -> aparece 'datos.mudanza' (descargar una copia entera del servidor).
 # Las migraciones son automaticas al leer (ver _leer y _migrar).
-FORMATO = 3
+FORMATO = 4
 
 # Todo lo que se puede permitir o negar, por AREAS. Es una lista CERRADA a
 # proposito: el panel comprueba permisos por nombre, y un permiso que solo
@@ -141,6 +142,7 @@ AREAS = (
         ("ajustes.remoto", "Cambiar a donde se suben los respaldos"),
         ("ajustes.fondo", "Cambiar la imagen de la pantalla de entrada"),
         ("datos.borrar", "BORRAR los respaldos de un equipo"),
+        ("datos.mudanza", "DESCARGAR una copia entera del servidor"),
     )),
     ("Cuentas y registro", (
         ("usuarios.ver", "Ver las cuentas y los roles"),
@@ -183,6 +185,7 @@ HERENCIA = {
     "ajustes.remoto": ("ajustes.ver",),
     "ajustes.fondo": ("ajustes.ver",),
     "datos.borrar": ("ajustes.ver",),
+    "datos.mudanza": ("ajustes.ver",),
     "usuarios.crear": ("usuarios.ver",),
     "usuarios.editar": ("usuarios.ver",),
     "usuarios.baja": ("usuarios.ver",),
@@ -208,6 +211,35 @@ EQUIVALENCIAS = {
                  "usuarios.baja", "roles.editar", "roles.baja",
                  "auditoria.ver", "auditoria.desbloquear"),
 }
+
+# La misma tabla, pero para traducir lo que se QUITA. Ver _traducir: quitar
+# 'ajustes' tiene que dejar fuera del area entera, incluido lo que se anadio a
+# esa pantalla despues de que alguien escribiera esa exclusion.
+EQUIVALENCIAS_AL_QUITAR = {
+    **EQUIVALENCIAS,
+    "ajustes": EQUIVALENCIAS["ajustes"] + ("datos.mudanza",),
+}
+
+# Los permisos que existian en el formato 3, para poder reconocer al migrar un
+# rol que lo tenia TODO. Se escribe a mano y no se calcula quitandole a
+# PERMISOS lo que se anadio: asi sigue significando lo mismo dentro de un ano,
+# cuando haya un formato 5 y este conjunto ya no sea "todo menos uno".
+#
+# 'datos.mudanza' no se reparte con EQUIVALENCIAS, que es como se tradujeron
+# los permisos gruesos del formato 2, y la diferencia es intencionada: aquello
+# traducia un permiso que la gente YA tenia, y esto es un permiso nuevo que no
+# tenia nadie. Un permiso nuevo que ademas descarga las credenciales de la
+# empresa entera no se regala a quien resulte que encaja en una equivalencia;
+# se le da solo a quien ya podia hacer absolutamente todo lo demas.
+PERMISOS_FORMATO_3 = frozenset({
+    "estado.ver", "equipos.ver", "cambios.ver", "diferencias",
+    "equipos.crear", "equipos.editar", "equipos.baja", "equipos.importar",
+    "equipos.identidades",
+    "ajustes.ver", "ajustes.programador", "ajustes.respaldar", "ajustes.ssh",
+    "ajustes.remoto", "ajustes.fondo", "datos.borrar",
+    "usuarios.ver", "usuarios.crear", "usuarios.editar", "usuarios.baja",
+    "roles.editar", "roles.baja", "auditoria.ver", "auditoria.desbloquear",
+})
 
 # Los roles con los que arranca una instalacion nueva (y a los que se convierte
 # un archivo de formato 1). A partir de ahi son datos: se editan desde el panel
@@ -661,7 +693,27 @@ class Usuarios:
                 # tiene que seguir sin poder entrar a Ajustes, y eso ahora son
                 # ocho permisos. Traducir solo los 'mas' le devolveria en
                 # silencio un acceso que alguien le habia retirado a proposito.
-                cuenta.permisos_menos = sorted(_traducir(cuenta.permisos_menos))
+                #
+                # Y se traduce con al_quitar: la exclusion se lleva tambien lo
+                # que se anadio a Ajustes despues (ver _traducir).
+                cuenta.permisos_menos = sorted(
+                    _traducir(cuenta.permisos_menos, al_quitar=True)
+                )
+
+        if formato < 4:
+            # 'datos.mudanza' es nuevo, asi que nadie lo pierde: la pregunta es
+            # a quien se le da de entrada. Se le da al rol que ya tenia los 24
+            # permisos anteriores, y a ninguno mas.
+            #
+            # Sin esta linea, actualizar deja el rol 'admin' del archivo con 24
+            # permisos y el codigo esperando 25: el panel arrancaria sin que
+            # nadie -tampoco el administrador- pueda descargar la copia, y
+            # arreglarlo obligaria a ir a la pantalla de roles a marcar una
+            # casilla que nadie sabe que le falta. Un rol llamado "todo" que se
+            # queda corto solo porque el programa crecio es una trampa.
+            for nombre, permisos in list(self._roles.items()):
+                if PERMISOS_FORMATO_3.issubset(set(permisos)):
+                    self._roles[nombre] = sorted(set(permisos) | {"datos.mudanza"})
 
         return cuentas
 
@@ -1544,17 +1596,31 @@ def _roles_iniciales() -> dict[str, list[str]]:
     return {nombre: list(permisos) for nombre, permisos in ROLES_INICIALES.items()}
 
 
-def _traducir(permisos) -> set[str]:
+def _traducir(permisos, al_quitar: bool = False) -> set[str]:
     """Cambia los permisos viejos por los nuevos. Idempotente.
 
     Un permiso que ya sea de los nuevos pasa tal cual, asi que se puede llamar
     tantas veces como haga falta sin que cambie el resultado. Eso importa
     porque se llama en dos sitios: al migrar el archivo (una vez) y al calcular
     los permisos efectivos (en cada peticion).
+
+    `al_quitar` cambia la traduccion de 'ajustes', y la asimetria es a
+    proposito: al QUITAR, un permiso grueso se lleva por delante tambien lo que
+    se anadio a esa area despues; al DAR, solo reparte lo que existia entonces.
+
+    Sale de un caso concreto que casi se cuela. Una cuenta con el rol admin y
+    `permisos_menos: ["ajustes"]` es alguien a quien se le retiro esa pantalla a
+    proposito. Al aparecer 'datos.mudanza', su rol se lo daba -es el rol que lo
+    tiene todo- y su exclusion no se lo quitaba, porque aquella lista se escribio
+    cuando ese permiso no existia. Y como 'datos.mudanza' arrastra 'ajustes.ver'
+    por HERENCIA, la cuenta volvia a entrar a Ajustes y ademas podia descargarse
+    el servidor entero. Una actualizacion que le devuelve a alguien un acceso que
+    le habian quitado es exactamente lo que la migracion existe para evitar.
     """
+    tabla = EQUIVALENCIAS_AL_QUITAR if al_quitar else EQUIVALENCIAS
     salida: set[str] = set()
     for permiso in permisos or ():
-        salida.update(EQUIVALENCIAS.get(permiso, (permiso,)))
+        salida.update(tabla.get(permiso, (permiso,)))
     return salida
 
 

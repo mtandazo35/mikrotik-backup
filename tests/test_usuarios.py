@@ -65,6 +65,12 @@ VER_FINO = {"estado.ver", "equipos.ver", "cambios.ver"}
 AJUSTES_FINO = {"ajustes.ver", "ajustes.programador", "ajustes.respaldar",
                 "ajustes.ssh", "ajustes.remoto", "ajustes.fondo",
                 "equipos.identidades", "datos.borrar"}
+# Lo que QUITA una exclusion vieja de 'ajustes'. Es uno mas que lo que DA la
+# misma palabra, y esa asimetria es el contrato: dar reparte lo que existia
+# cuando se escribio la lista, quitar deja fuera del area entera. Sin esto, a
+# quien le retiraron Ajustes hace un ano le entra cada permiso nuevo que se
+# anada a esa pantalla, que en este caso era descargar el servidor completo.
+AJUSTES_FINO_AL_QUITAR = AJUSTES_FINO | {"datos.mudanza"}
 USUARIOS_FINO = {"usuarios.ver", "usuarios.crear", "usuarios.editar",
                  "usuarios.baja", "roles.editar", "roles.baja",
                  "auditoria.ver", "auditoria.desbloquear"}
@@ -1028,7 +1034,13 @@ def pruebas(carpeta: Path) -> None:
               "despues de migrar",
               "ajustes.ver" not in permisos_acme)
     comprobar("y no le queda NINGUNO de los permisos de Ajustes",
-              not (AJUSTES_FINO & permisos_acme))
+              not (AJUSTES_FINO_AL_QUITAR & permisos_acme))
+    # En particular no puede descargarse el servidor entero. Su rol es 'admin',
+    # que tiene ese permiso, pero a esta cuenta le habian cerrado Ajustes: que
+    # un permiso creado despues se lo abra otra vez es justo el fallo que la
+    # traduccion asimetrica evita.
+    comprobar("y sigue sin poder descargar la copia del servidor",
+              "datos.mudanza" not in permisos_acme)
     comprobar("pero conserva todo lo demas que le daba su rol",
               {"equipos.crear", "equipos.baja", "diferencias"} <= permisos_acme
               and USUARIOS_FINO <= permisos_acme)
@@ -1059,9 +1071,10 @@ def pruebas(carpeta: Path) -> None:
               and not (set(usr.EQUIVALENCIAS)
                        & {p for fila in escrito_v2["usuarios"]
                           for p in fila["permisos_mas"] + fila["permisos_menos"]}))
-    comprobar("los permisos_menos guardados son ya los ocho finos de Ajustes",
+    comprobar("los permisos_menos guardados son ya los finos de Ajustes",
               {fila["nombre"]: set(fila["permisos_menos"])
-               for fila in escrito_v2["usuarios"]}["acme.jefe"] == AJUSTES_FINO)
+               for fila in escrito_v2["usuarios"]}["acme.jefe"]
+              == AJUSTES_FINO_AL_QUITAR)
     comprobar("las claves de siempre siguen entrando tras la migracion",
               mig.autenticar("acme.jefe", "clave-larga-1") is not None)
 
@@ -1114,6 +1127,53 @@ def pruebas(carpeta: Path) -> None:
               == {"estado.ver", "diferencias", "cambios.ver"}
               and nuevo_formato.obtener("contable").alcance
               .puede_ver("acme s.a.", "core-01"))
+
+    # 17 bis. De formato 3 a 4: aparece 'datos.mudanza', que descarga una copia
+    # del servidor entero -inventario con claves incluido-. Un permiso NUEVO no
+    # se lo quita a nadie, asi que la pregunta no es que se conserva sino a
+    # quien se le da de entrada, y ahi equivocarse tiene las dos direcciones
+    # malas: darselo a todos reparte las credenciales de la flota, y no darselo
+    # a nadie deja el boton apagado tambien para el administrador, que ni
+    # siquiera sabe que existe la casilla que le falta.
+    ruta_v3v = carpeta / "formato3-viejo.json"
+    ruta_v3v.write_text(json.dumps({
+        "formato": 3,
+        "roles": {
+            "admin": sorted(usr.PERMISOS_FORMATO_3),
+            "casi": sorted(usr.PERMISOS_FORMATO_3 - {"auditoria.desbloquear"}),
+            "lector": ["estado.ver", "equipos.ver", "cambios.ver"],
+        },
+        "usuarios": [
+            {"nombre": "jefe", "rol": "admin", "clave_hash": hash_bueno,
+             "creado": "", "ultimo_acceso": "",
+             "permisos_mas": [], "permisos_menos": [],
+             "alcance": {"todo": True, "empresas": {}, "equipos": {}}},
+        ],
+    }, indent=2), encoding="utf-8")
+
+    v4 = usr.Usuarios(ruta_v3v, iteraciones=ITER)
+    roles_v4 = v4.roles()
+    comprobar("el rol que tenia los 24 permisos del formato 3 recibe "
+              "'datos.mudanza'",
+              set(roles_v4["admin"]) == set(usr.PERMISOS))
+    comprobar("un rol al que le faltaba UNO no lo recibe",
+              "datos.mudanza" not in roles_v4["casi"])
+    comprobar("y el 'lector' sigue exactamente igual",
+              set(roles_v4["lector"]) == {"estado.ver", "equipos.ver",
+                                          "cambios.ver"})
+    comprobar("el administrador puede descargar la copia despues de migrar",
+              "datos.mudanza" in v4.permisos(v4.obtener("jefe")))
+    comprobar(f"y el archivo queda marcado como formato {usr.FORMATO}",
+              json.loads(ruta_v3v.read_text(encoding="utf-8")).get("formato")
+              == usr.FORMATO)
+
+    # Releer no vuelve a migrar: si lo hiciera, el panel reescribiria el archivo
+    # de cuentas en cada peticion.
+    texto_v4 = ruta_v3v.read_text(encoding="utf-8")
+    otra_vez = usr.Usuarios(ruta_v3v, iteraciones=ITER)
+    otra_vez.roles()
+    comprobar("releer el archivo ya migrado a 4 no lo vuelve a tocar",
+              ruta_v3v.read_text(encoding="utf-8") == texto_v4)
 
     # 18. Archivo corrupto: nadie entra, nada se sobreescribe, todo se explica.
     roto, ruta_rota = nuevo(carpeta, "roto.json")

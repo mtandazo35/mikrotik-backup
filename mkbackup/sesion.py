@@ -111,15 +111,26 @@ class Sesiones:
     def __init__(
         self,
         duracion_horas: int = 8,
+        inactividad_minutos: int = 30,
         intentos_max: int = 5,
         bloqueo_segundos: int = 300,
     ):
+        # Dos relojes, y hacen falta los dos.
+        #
+        # `duracion` es el tope absoluto: pase lo que pase, a las N horas hay
+        # que volver a escribir la clave. `inactividad` es el que se reinicia
+        # con cada uso: media hora sin tocar el panel y la sesion se cierra
+        # sola. Solo el primero deja una sesion abierta toda la jornada en un
+        # ordenador que alguien dejo desbloqueado; solo el segundo deja una
+        # sesion viva indefinidamente mientras se use, que es justo lo que no
+        # se quiere de una credencial robada.
         self.duracion = duracion_horas * 3600
+        self.inactividad = inactividad_minutos * 60
         self.intentos_max = intentos_max
         self.bloqueo = bloqueo_segundos
         self._lock = threading.Lock()
-        # token -> (usuario, momento de caducidad)
-        self._abiertas: dict[str, tuple[str, float]] = {}
+        # token -> (usuario, tope absoluto, tope por quietud)
+        self._abiertas: dict[str, tuple[str, float, float]] = {}
         self._fallos: dict[str, tuple[int, float]] = {}  # ip -> (cuantos, ultimo)
 
     # monotonic y no time(): un cambio de hora del sistema (NTP, horario de
@@ -131,17 +142,29 @@ class Sesiones:
     def abrir(self, usuario: str) -> str:
         """Abre sesion para esa cuenta y devuelve su token."""
         token = secrets.token_urlsafe(TOKEN_BYTES)
+        ahora = self._ahora()
         with self._lock:
             self._purgar()
-            self._abiertas[token] = (usuario, self._ahora() + self.duracion)
+            self._abiertas[token] = (
+                usuario, ahora + self.duracion, ahora + self.inactividad
+            )
         return token
 
-    def valida(self, token: str | None) -> str | None:
+    def valida(self, token: str | None, refrescar: bool = True) -> str | None:
         """Nombre del usuario dueno del token, o None si no vale.
 
         Devuelve el nombre y no un bool porque quien pregunta (cada peticion
         del panel) necesita justo eso a continuacion: mirar el rol de esa
         cuenta. Si devolviera bool habria que llevar el nombre por otro lado.
+
+        `refrescar` es lo que distingue "usar el panel" de "tener el panel
+        abierto", y de eso depende que la caducidad por inactividad sirva de
+        algo. La pantalla de Estado le pregunta a /api/estado cada pocos
+        segundos por su cuenta, sin que nadie toque nada: si esas peticiones
+        reiniciaran el reloj, una pestana olvidada en un ordenador encendido
+        mantendria la sesion viva para siempre, que es exactamente la situacion
+        contra la que existe el tope. Quien llama pasa refrescar=False para
+        esas rutas (ver web._usuario).
         """
         if not token:
             return None
@@ -149,10 +172,13 @@ class Sesiones:
             entrada = self._abiertas.get(token)
             if entrada is None:
                 return None
-            usuario, caduca = entrada
-            if caduca <= self._ahora():
+            usuario, tope, quietud = entrada
+            ahora = self._ahora()
+            if tope <= ahora or quietud <= ahora:
                 del self._abiertas[token]
                 return None
+            if refrescar:
+                self._abiertas[token] = (usuario, tope, ahora + self.inactividad)
             return usuario
 
     def cerrar(self, token: str | None) -> None:
@@ -174,15 +200,33 @@ class Sesiones:
         if not nombre:
             return 0
         with self._lock:
-            tokens = [t for t, (u, _) in self._abiertas.items() if u == nombre]
+            tokens = [t for t, (u, *_) in self._abiertas.items() if u == nombre]
             for token in tokens:
                 del self._abiertas[token]
             return len(tokens)
 
+    def cerrar_todas(self) -> int:
+        """Cierra TODAS las sesiones abiertas. Devuelve cuantas eran.
+
+        Existe por la restauracion de una copia: al volcar el paquete se
+        reemplaza el archivo de cuentas entero, asi que los tokens que hay en
+        memoria apuntan a usuarios que quiza ya no existen, o que existen con
+        otro rol y otro alcance. Dejarlos vivos seria mantener dentro del panel
+        -con los permisos de antes- a gente cuyo archivo de cuentas acaba de
+        desaparecer.
+        """
+        with self._lock:
+            cuantas = len(self._abiertas)
+            self._abiertas.clear()
+            return cuantas
+
     def _purgar(self) -> None:
         """Tira lo caducado. Debe llamarse con el lock tomado."""
         ahora = self._ahora()
-        for token in [t for t, (_, caduca) in self._abiertas.items() if caduca <= ahora]:
+        for token in [
+            t for t, (_, tope, quietud) in self._abiertas.items()
+            if tope <= ahora or quietud <= ahora
+        ]:
             del self._abiertas[token]
         for ip in [
             i for i, (_, ultimo) in self._fallos.items()

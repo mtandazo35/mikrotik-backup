@@ -221,6 +221,128 @@ def _clave_usuario(cfg: Config, nombre: str) -> int:
     return 0
 
 
+# --- Mudanza a otro servidor ------------------------------------------------
+# Empaquetar tambien se hace desde el panel; restaurar solo se puede hacer aqui.
+# En la maquina nueva todavia no hay ninguna cuenta con la que entrar al panel,
+# porque las cuentas van justo dentro del paquete que se quiere restaurar (ver
+# la cabecera de mudanza.py). Los dos van despues de cargar la configuracion:
+# ella es la que dice donde esta cada pieza en ESTA maquina.
+
+
+def _exportar_datos(cfg: Config, ruta: str) -> int:
+    """Empaqueta el servidor entero en un .tar.gz para llevarselo."""
+    # Perezoso como --web o --planificador: quien solo respalda no tiene por
+    # que cargar tarfile ni el modulo de la mudanza.
+    from . import mudanza
+
+    destino = Path(ruta)
+    if destino.is_dir():
+        # Dar una carpeta es lo que se escribe sin pensar ("mandalo al
+        # pendrive"). Se le pone dentro el nombre de siempre en vez de fallar
+        # con un "es un directorio" que no ayuda a nadie.
+        destino = destino / mudanza.nombre_sugerido(cfg)
+
+    try:
+        faltan = mudanza.resumen(cfg)["faltan"]
+        if faltan:
+            # Se avisa y se sigue: de una copia a la que se sabe que le falta
+            # algo se puede tirar; de la que no se hizo por negarse, no.
+            log.warning(
+                "Faltan piezas esenciales en este servidor: %s. El paquete se "
+                "hace igual, pero al restaurarlo tampoco estaran.",
+                ", ".join(faltan),
+            )
+
+        manifiesto = mudanza.empaquetar(cfg, destino)
+        log.info(
+            "Paquete escrito en %s (%.1f MB, %d pieza(s))",
+            destino,
+            destino.stat().st_size / (1024 * 1024),
+            len(manifiesto.get("piezas") or []),
+        )
+    except mudanza.ErrorMudanza as exc:
+        log.error("Mudanza: %s", exc)
+        return 2
+    except OSError as exc:
+        log.error("No se pudo escribir %s: %s", destino, exc)
+        return 2
+
+    log.warning(
+        "Ese archivo lleva las claves SSH de la flota en claro y las cuentas "
+        "del panel: tratalo como tal y borralo cuando llegue a su destino."
+    )
+    return 0
+
+
+def _restaurar_datos(cfg: Config, ruta: str, sobrescribir: bool) -> int:
+    """Deja esta maquina como estaba la que hizo el paquete."""
+    from . import mudanza
+    from .planificador import estado_programador
+
+    origen = Path(ruta)
+    try:
+        manifiesto = mudanza.leer_manifiesto(origen)
+    except mudanza.ErrorMudanza as exc:
+        log.error("Mudanza: %s", exc)
+        return 2
+
+    # Se dice de que paquete se trata ANTES de tocar nada: equivocarse de
+    # archivo se nota aqui leyendo una linea, y no despues, viendo el
+    # inventario de otro cliente en el panel.
+    log.info(
+        "El paquete viene de '%s', es del %s y lo hizo mkbackup %s%s",
+        manifiesto.get("servidor") or "?",
+        manifiesto.get("cuando") or "?",
+        manifiesto.get("version") or "?",
+        f" ({manifiesto.get('commit')})" if manifiesto.get("commit") else "",
+    )
+
+    programador = estado_programador(cfg)
+    if programador.get("corriendo"):
+        # Restaurar por debajo de un ciclo en marcha reescribe el repositorio
+        # que ese ciclo esta usando: lo que queda no es ni lo viejo ni lo
+        # nuevo. Esto no es un aviso, es una negativa.
+        log.error(
+            "Hay un ciclo de respaldo EN MARCHA. Restaurar ahora reescribiria "
+            "el repositorio que ese ciclo esta usando. Para los servicios "
+            "(mkbackup.service y el panel), espera a que termine y repite la "
+            "orden."
+        )
+        return 2
+    if programador.get("proxima"):
+        log.warning(
+            "El programador tiene el proximo ciclo previsto para %s: si sigue "
+            "vivo arrancara a mitad de la restauracion. Paralo antes.",
+            programador["proxima"],
+        )
+
+    try:
+        hecho = mudanza.restaurar(cfg, origen, sobrescribir=sobrescribir)
+    except mudanza.ErrorMudanza as exc:
+        log.error("Mudanza: %s", exc)
+        return 2
+    except OSError as exc:
+        log.error("No se pudo restaurar %s: %s", origen, exc)
+        return 2
+
+    log.info("Restauradas %d pieza(s)", len(hecho["puestas"]))
+    for apartada in hecho["apartadas"]:
+        log.info("Lo que habia antes se aparto en %s", apartada)
+    for ignorada in hecho["ignoradas"]:
+        log.warning(
+            "El paquete trae '%s', que este mkbackup no sabe donde poner: se "
+            "queda sin restaurar", ignorada,
+        )
+    for aviso in hecho["avisos"]:
+        log.warning("%s", aviso)
+
+    log.info(
+        "Los servicios siguen parados: arrancalos (mkbackup.service y el "
+        "panel) cuando compruebes que el inventario y el historico estan."
+    )
+    return 0
+
+
 def _respaldar_con_reintentos(
     equipo: Equipo, cfg: Config, estado: Estado
 ) -> tuple[Equipo, Resultado | None, ErrorEquipo | None]:
@@ -764,6 +886,24 @@ def main(argv: list[str] | None = None) -> int:
              "admin, porque la cuenta que se crea desde el terminal suele ser "
              "la primera o la de rescate",
     )
+    parser.add_argument(
+        "--exportar-datos", default="", metavar="RUTA",
+        help="empaquetar este servidor entero (historico, inventario, cuentas "
+             "y ajustes) en un .tar.gz para mudarlo a otra maquina; si RUTA es "
+             "una carpeta que ya existe, se escribe dentro con el nombre por "
+             "defecto",
+    )
+    parser.add_argument(
+        "--restaurar-datos", default="", metavar="RUTA",
+        help="volcar en esta maquina un paquete hecho con --exportar-datos; "
+             "hazlo con los servicios parados",
+    )
+    parser.add_argument(
+        "--sobrescribir", action="store_true",
+        help="con --restaurar-datos, reemplazar los datos que ya hubiera aqui; "
+             "lo de ahora se aparta con el sufijo '.antes-de-restaurar' y no "
+             "se borra",
+    )
     parser.add_argument("-v", "--verboso", action="store_true")
     parser.add_argument("--version", action="version", version=f"mkbackup {__version__}")
 
@@ -792,6 +932,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.clave_usuario:
         return _clave_usuario(cfg, args.clave_usuario)
+
+    if args.exportar_datos:
+        return _exportar_datos(cfg, args.exportar_datos)
+
+    if args.restaurar_datos:
+        return _restaurar_datos(cfg, args.restaurar_datos, args.sobrescribir)
 
     if args.web:
         # Importado aqui y no arriba: quien solo respalda no necesita cargar

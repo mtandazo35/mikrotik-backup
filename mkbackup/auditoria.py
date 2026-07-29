@@ -47,6 +47,15 @@ EVENTOS = {
     "equipo_cambio": "Edito un equipo",
     "equipo_baja": "Dio de baja un equipo",
     "datos_borrados": "Borro los respaldos de un equipo",
+    # Se descargo una copia del servidor entero. Es el evento mas importante
+    # del registro: ese archivo lleva dentro el inventario con las claves de
+    # los routers, las cuentas del panel y el historico completo. Quien lo
+    # tiene, tiene la red.
+    "mudanza": "Descargo una copia de todo el servidor",
+    # Y el otro sentido: reemplazo el sistema entero por el de un paquete.
+    # Esta linea se pierde casi siempre -el registro es una de las piezas que
+    # se reemplazan-, asi que va tambien al log del servicio.
+    "mudanza_restaurada": "RESTAURO una copia sobre este servidor",
     "importacion": "Importo equipos",
     "ajustes": "Cambio los ajustes",
     "acceso_ssh": "Cambio el acceso a los routers",

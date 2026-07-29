@@ -585,6 +585,13 @@ ESTILO = """
   h2.aparte { margin-top: 1.6rem; }
   .pista.bajo-titulo { margin: -.5rem 0 1rem; }
   .separado { margin-top: 1.1rem; }
+  /* Un segundo apartado dentro de una tarjeta. Lo usa "Mudarse a otro
+     servidor", que hace dos cosas opuestas -sacar una copia y volcarla- y no
+     puede ensenarlas como si fueran la misma: la linea y el subtitulo son lo
+     que evita pulsar el boton de reemplazar creyendo que descarga. */
+  hr.fina { border: none; border-top: 1px solid var(--borde);
+            margin: 1.4rem 0 1.1rem; }
+  .tarjeta h3 { font-size: .95rem; margin: 0 0 .5rem; }
   /* "Respaldar ahora": va separado por una linea del formulario de arriba
      porque es OTRA cosa (una accion, no un ajuste que se guarda), y el boton
      es secundario a proposito: lo habitual es dejar que el programador haga su
@@ -2394,9 +2401,220 @@ def _bloque_datos(huerfanos, zona) -> str:
        divergido.</p>"""
 
 
+def bulto(n: int) -> str:
+    """1536 -> '1.5 KB'. Para hablar de tamanos sin escribir siete cifras."""
+    valor = float(max(0, int(n or 0)))
+    for unidad in ("B", "KB", "MB", "GB"):
+        if valor < 1024 or unidad == "GB":
+            entero = unidad == "B" or valor >= 100
+            return f"{valor:.0f} {unidad}" if entero else f"{valor:.1f} {unidad}"
+        valor /= 1024
+    return f"{valor:.1f} GB"
+
+
+def _bloque_mudanza(cfg, resumen) -> str:
+    """La copia del servidor entero: que se lleva, cuanto pesa y como se vuelve.
+
+    Se listan las piezas una a una en vez de poner solo un boton porque esta
+    pantalla tiene que responder a "y esto que se lleva exactamente". Un boton
+    que dice "descargar todo" obliga a fiarse; una lista con lo que hay y lo
+    que falta se puede comprobar.
+
+    Y se avisa de lo que lleva dentro con todas las letras. Este archivo es la
+    unica cosa que produce el panel que, si se pierde, entrega la flota entera:
+    las claves SSH van en claro en el inventario y el historico puede llevar
+    las passwords de los clientes. Quien lo descarga tiene que saberlo en el
+    momento de pulsar, no en la documentacion.
+    """
+    datos = resumen or {}
+    lista = datos.get("piezas") or []
+
+    filas = []
+    for pieza in lista:
+        hay = pieza.get("hay")
+        if hay:
+            cuanto = bulto(pieza.get("bytes", 0))
+            if pieza.get("carpeta"):
+                cuanto = f"{esc(pieza.get('archivos', 0))} archivos, {cuanto}"
+            marca = f'<span class="pista">{esc(cuanto)}</span>'
+        else:
+            # Lo que no esta se dice, no se esconde. Que falte replica.json es
+            # normal recien instalado; que falte usuarios.json no lo es, y esa
+            # diferencia solo se ve si salen los dos.
+            marca = '<span class="pista">no hay</span>'
+        filas.append(
+            f'<tr><td><code>{esc(pieza.get("nombre", ""))}</code></td>'
+            f'<td>{esc(pieza.get("que", ""))}</td>'
+            f"<td>{marca}</td></tr>"
+        )
+
+    faltan = datos.get("faltan") or []
+    if faltan:
+        aviso_falta = (
+            '<div class="aviso"><strong>Falta algo importante.</strong> No hay '
+            f"{esc(', '.join(faltan))}, asi que esta copia no basta para "
+            "levantar el sistema en otra maquina.</div>"
+        )
+    else:
+        aviso_falta = ""
+
+    # La orden que hay que teclear EN EL SERVIDOR NUEVO. Va escrita entera y no
+    # como "consulta la documentacion": el dia que haga falta es el dia que el
+    # servidor viejo ya no esta para consultarlo.
+    orden = ("mkbackup -c /root/mkbackup/config.yaml "
+             "--restaurar-datos /ruta/del/archivo.tar.gz")
+
+    return f"""
+    <p class="sub">Se lleva TODO lo de este servidor en un solo archivo: el
+       historico completo, el inventario, las cuentas del panel, los ajustes y
+       el registro. Es lo que hay que tener para cambiar de maquina sin volver
+       a empezar.</p>
+    {aviso_falta}
+    <div class="tabla-caja"><table>
+      <tbody>{"".join(filas)}</tbody>
+    </table></div>
+    <p class="pista separado">En total {esc(bulto(datos.get("bytes", 0)))} sin
+       comprimir ({esc(datos.get("archivos", 0))} archivos). El .tar.gz sale
+       bastante menor: casi todo son configuraciones en texto.</p>
+    <div class="aviso"><strong>Este archivo abre la puerta de toda la red.</strong>
+       Lleva dentro las claves SSH de los routers tal cual, los hashes de las
+       claves del panel{" y, porque los respaldos guardan los secretos, las passwords PPPoE y las PSK de tus clientes" if cfg.export.mostrar_secretos else ""}.
+       Guardalo donde guardarias esas claves y no en el escritorio.</div>
+    <form method="post" action="/ajustes/mudanza">
+      <button type="submit">Descargar la copia del servidor</button>
+      <span class="pista">Tarda lo que tarde en comprimir el historico. Queda
+        anotado en el registro de auditoria: quien y cuando.</span>
+    </form>
+    <hr class="fina">
+    <h3>Cargar una copia</h3>
+    <p class="sub">Vuelca aqui un paquete hecho con el boton de arriba.
+       <strong>Reemplaza todo lo de este servidor</strong>: el historico, el
+       inventario y las cuentas. Primero se sube y se dice de donde viene; no
+       se toca nada hasta que lo confirmes.</p>
+    <form method="post" action="/ajustes/mudanza/subir"
+          enctype="multipart/form-data">
+      <div class="campo">
+        <label for="paquete">El archivo .tar.gz</label>
+        <input id="paquete" type="file" name="archivo" accept=".gz,.tgz"
+               required>
+        <div class="pista">Se comprueba que sea un paquete de mkbackup y que
+          este entero antes de dejarte confirmar.</div>
+      </div>
+      <button class="peligro" type="submit">Subir y ver que trae</button>
+    </form>
+    <p class="pista separado">En un servidor <strong>recien instalado</strong>
+       esto no sirve todavia: para llegar a esta pantalla hace falta una cuenta,
+       y las cuentas van dentro del paquete. Ahi se restaura desde el terminal,
+       con los servicios parados:<br><code>{esc(orden)}</code></p>"""
+
+
+def confirmar_mudanza(vale: str, manifiesto: dict, tamano: int,
+                      sesion=None, zona=None) -> str:
+    """El paso intermedio: esto es lo que trae el paquete, ¿lo vuelco?
+
+    Existe porque equivocarse de archivo aqui no se parece a equivocarse en
+    ningun otro sitio del panel: se sustituye la flota entera, las cuentas y el
+    historico por los de otro momento o los de otro servidor. Se ensena de
+    DONDE viene y de CUANDO es antes de tocar nada, que es la unica forma de
+    darse cuenta a tiempo.
+    """
+    piezas = manifiesto.get("piezas") or []
+    filas = "".join(
+        f'<tr><td><code>{esc(p.get("nombre", ""))}</code></td>'
+        f'<td>{esc(bulto(p.get("bytes", 0)))}'
+        + (f' en {esc(p.get("archivos", 0))} archivos' if p.get("carpeta") else "")
+        + "</td></tr>"
+        for p in piezas
+    )
+
+    cuerpo = f"""
+  <div class="tarjeta">
+    <h2>Vas a reemplazar este servidor</h2>
+    <div class="aviso"><strong>Lee de donde viene esto antes de seguir.</strong>
+       Se van a sustituir el historico, el inventario, las cuentas del panel y
+       los ajustes por los del paquete. Lo que hay ahora no se borra: se aparta
+       con el sufijo <code>.antes-de-restaurar</code>, en la misma carpeta.</div>
+    <div class="tabla-caja"><table>
+      <tbody>
+        <tr><td>Viene del servidor</td>
+            <td><strong>{esc(manifiesto.get("servidor") or "?")}</strong></td></tr>
+        <tr><td>Se hizo el</td>
+            <td>{esc(fecha(manifiesto.get("cuando", ""), zona)
+                     if manifiesto.get("cuando") else "?")}</td></tr>
+        <tr><td>Con mkbackup</td>
+            <td><code>{esc(manifiesto.get("version") or "?")}</code>
+                {esc(manifiesto.get("commit") or "")}</td></tr>
+        <tr><td>Ocupa</td><td>{esc(bulto(tamano))}</td></tr>
+      </tbody>
+    </table></div>
+    <h3>Lo que trae dentro</h3>
+    <div class="tabla-caja"><table><tbody>{filas}</tbody></table></div>
+    <form method="post" action="/ajustes/mudanza/restaurar" class="separado">
+      <input type="hidden" name="vale" value="{esc(vale)}">
+      <div class="campo">
+        <label for="conf-restaurar">Escribe RESTAURAR para confirmar</label>
+        <input id="conf-restaurar" type="text" name="confirmacion" value=""
+               autocomplete="off" placeholder="RESTAURAR">
+      </div>
+      <button class="peligro" type="submit">Reemplazar este servidor</button>
+      <span class="pista">Al terminar se cierran todas las sesiones, incluida
+        la tuya: el archivo de cuentas es otro.</span>
+    </form>
+    <p class="pista separado"><a href="/ajustes">Dejarlo aqui</a>. El paquete
+       subido se borra solo al cabo de una hora.</p>
+  </div>"""
+    return envoltura("mkbackup - restaurar una copia", cuerpo, sesion,
+                     activo="ajustes")
+
+
+def mudanza_hecha(hecho: dict) -> str:
+    """Lo que queda por hacer despues de restaurar. Sin sesion: ya no hay.
+
+    No lleva la navegacion normal a proposito: en este punto las cuentas son
+    otras y la sesion esta cerrada, asi que cualquier enlace del menu acabaria
+    en el login. Mejor decirlo que dejar que se descubra a base de clics.
+    """
+    apartadas = hecho.get("apartadas") or []
+    avisos = hecho.get("avisos") or []
+
+    lista_avisos = ""
+    if avisos:
+        lista_avisos = (
+            '<div class="aviso"><strong>Ojo con esto:</strong><ul>'
+            + "".join(f"<li>{esc(a)}</li>" for a in avisos)
+            + "</ul></div>"
+        )
+
+    donde = ""
+    if apartadas:
+        donde = (
+            '<p class="pista">Lo que habia antes no se borro. Esta aqui, por si '
+            "hay que volver atras:</p><ul class=\"pista\">"
+            + "".join(f"<li><code>{esc(x)}</code></li>" for x in apartadas)
+            + "</ul>"
+        )
+
+    cuerpo = f"""
+  <div class="tarjeta">
+    <h2>Restaurado</h2>
+    <p class="sub">Se volcaron {esc(len(hecho.get("puestas") or []))} piezas.
+       Todas las sesiones se han cerrado, porque las cuentas del panel son
+       ahora las del paquete.</p>
+    {lista_avisos}
+    <div class="aviso"><strong>Falta reiniciar los servicios.</strong> El panel
+       y el programador siguen corriendo con la configuracion que tenian
+       cargada en memoria. Desde el servidor:
+       <code>systemctl restart mkbackup mkbackup-web</code></div>
+    {donde}
+    <p class="separado"><a href="/entrar">Volver a entrar</a></p>
+  </div>"""
+    return envoltura("mkbackup - restaurado", cuerpo, None)
+
+
 def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=None,
             sesion=None, fondo: str = "", sondeo=None, equipos_totales: int = 0,
-            equipos_sin_nombre: int = 0, replica=None, huerfanos=None) -> str:
+            equipos_sin_nombre: int = 0, replica=None, huerfanos=None,
+            mudanza=None) -> str:
     bloque_error = f'<div class="error">{esc(error)}</div>' if error else ""
     bloque_ok = f'<div class="bien">{esc(mensaje)}</div>' if mensaje else ""
     replica_ahora = replica or {}
@@ -2606,6 +2824,18 @@ def ajustes(cfg, programador: dict, mensaje: str = "", error: str = "", zona=Non
   <div class="tarjeta">
     <h2>A donde se suben los respaldos</h2>
     {_bloque_remoto(cfg, replica_ahora, zona)}
+  </div>""")
+
+    # Justo detras del remoto y no al final: los dos hablan de sacar una copia
+    # de esta maquina, y quien esta pensando en "que pasa si pierdo el
+    # servidor" tiene las dos respuestas seguidas. El remoto contesta a
+    # "conservo el historico"; esto, a "levanto el sistema entero en otro
+    # sitio", que no es lo mismo y suele confundirse.
+    if puede(sesion, "datos.mudanza"):
+        tarjetas.append(f"""
+  <div class="tarjeta">
+    <h2>Mudarse a otro servidor</h2>
+    {_bloque_mudanza(cfg, mudanza)}
   </div>""")
 
     if puede(sesion, "ajustes.fondo"):

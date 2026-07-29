@@ -37,7 +37,11 @@ from __future__ import annotations
 import json
 import logging
 import ipaddress
+import os
+import secrets
+import shutil
 import threading
+import time
 import unicodedata
 from functools import partial
 from http.cookies import SimpleCookie
@@ -48,6 +52,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import historial as hist
 from . import identidades
 from . import importar as imp
+from . import mudanza
 from . import paginas
 from .config import Config, zona_horaria
 from .estado import resumen
@@ -132,6 +137,29 @@ MAXIMO_SUBIDA = 4 * 1024 * 1024
 # Ojo si hay un proxy delante: nginx corta en client_max_body_size (1 MB por
 # defecto) y devolveria un 413 suyo antes de que esto llegue a verse.
 MAXIMO_IMAGEN = 30 * 1024 * 1024
+
+# Tope de la copia del servidor que se sube para restaurar. Es mucho mas alto
+# que los demas y se lo puede permitir porque este NO se lee en memoria: se
+# vuelca a disco segun llega (ver _recibir_paquete). Lo que lo acota de verdad
+# es el disco, que se comprueba antes de aceptar nada.
+#
+# El tope existe igual, porque una subida sin limite es una forma comoda de
+# llenarle el disco a un servidor. Por encima de esto se restaura desde el
+# terminal, que no pasa por aqui.
+#
+# Ojo con el proxy: nginx corta en client_max_body_size (1 MB por defecto) y
+# devolveria su propio 413 mucho antes que esto.
+MAXIMO_MUDANZA = 1024 * 1024 * 1024
+
+# Como se llaman los paquetes subidos que aun no se han confirmado. El prefijo
+# empieza por punto para que no salga en un listado normal, y sirve para
+# encontrarlos y borrarlos: son copias completas del sistema, con todas sus
+# credenciales, esperando una confirmacion que puede no llegar nunca.
+PREFIJO_SUBIDA = ".mudanza-subida-"
+
+# Lo que hay que escribir para reemplazar el servidor entero. En mayusculas y
+# sin acentos: hay que teclearlo a conciencia, que es justo el punto.
+PALABRA_RESTAURAR = "RESTAURAR"
 
 # Tipos de imagen que se aceptan como fondo del login. Lista blanca: el tipo
 # que se declara sale de la EXTENSION, no del contenido, asi que se limita a
@@ -305,9 +333,32 @@ class Manejador(BaseHTTPRequestHandler):
         codigo: int = 200,
         extra: list[tuple[str, str]] | None = None,
     ) -> None:
+        self._cabeceras(codigo, tipo, len(cuerpo), extra)
+        self.wfile.write(cuerpo)
+
+    def _cabeceras(
+        self,
+        codigo: int,
+        tipo: str,
+        largo: int,
+        extra: list[tuple[str, str]] | None = None,
+    ) -> None:
+        """Las cabeceras de CUALQUIER respuesta. Separadas del cuerpo a proposito.
+
+        Existe aparte porque hay una respuesta que no puede pasar por
+        _responder: la copia del servidor entero (ver _mudanza), que se manda
+        leyendola del disco por trozos. Con el historico de una flota grande son
+        cientos de megas, y tenerlos que juntar en memoria para poder pasarlos
+        como bytes tumbaria el panel en una maquina pequena.
+
+        Lo que NO se hace es que esa respuesta se escriba sus propias cabeceras:
+        se le olvidaria una, y las que hay aqui son las que impiden que el panel
+        cargue nada externo, que lo empotren en un iframe o que una copia con las
+        credenciales de la flota se quede en la cache del disco.
+        """
         self.send_response(codigo)
         self.send_header("Content-Type", tipo)
-        self.send_header("Content-Length", str(len(cuerpo)))
+        self.send_header("Content-Length", str(largo))
         # El estado cambia cada pocos segundos y las paginas van tras login:
         # nada de esto debe quedarse en una cache de disco.
         if not any(c.lower() == "cache-control" for c, _ in extra or []):
@@ -328,7 +379,6 @@ class Manejador(BaseHTTPRequestHandler):
         for clave, valor in extra or []:
             self.send_header(clave, valor)
         self.end_headers()
-        self.wfile.write(cuerpo)
 
     def _html(self, pagina: str, codigo: int = 200) -> None:
         self._responder(pagina.encode("utf-8"), "text/html; charset=utf-8", codigo)
@@ -381,7 +431,16 @@ class Manejador(BaseHTTPRequestHandler):
         asi bajarle el rol a alguien surte efecto de inmediato, y una cuenta
         borrada deja de valer aunque su token siguiera vivo.
         """
-        nombre = self.ctx.sesiones.valida(self._token())
+        # El refresco automatico NO cuenta como actividad. La pantalla de
+        # Estado pregunta a /api/estado cada pocos segundos ella sola: si eso
+        # reiniciara el reloj de inactividad, bastaria con dejar una pestana
+        # abierta para que la sesion no caducara jamas, y el tope de media hora
+        # no protegeria de nada. Se comprueba el permiso igual; lo unico que no
+        # se hace es dar por vivo a quien no esta.
+        ruta = urlparse(self.path).path
+        nombre = self.ctx.sesiones.valida(
+            self._token(), refrescar=not ruta.startswith("/api/")
+        )
         if not nombre:
             return None
         return self.ctx.usuarios.obtener(nombre)
@@ -511,16 +570,29 @@ class Manejador(BaseHTTPRequestHandler):
         return True
 
     @staticmethod
-    def _cookie(token: str, segundos: int) -> tuple[str, str]:
+    def _cookie(token: str, borrar: bool = False) -> tuple[str, str]:
         # HttpOnly: si algun dia se cuela un XSS, al menos no se lleva la sesion.
         # SameSite=Strict: nadie puede hacer que tu navegador use tu sesion desde
         # otra pagina. Es tambien lo que protege las altas y bajas de un CSRF:
         # un POST desde otro sitio llega sin cookie y muere en el login.
         # Sin Secure a proposito: el panel habla HTTP y el navegador descartaria
         # la cookie. Si lo pones tras un proxy TLS, ese es el sitio de anadirlo.
+        #
+        # Y SIN Max-Age al entrar: eso la convierte en una cookie de sesion del
+        # navegador, que se borra al cerrarlo. Con Max-Age, la cookie sobrevivia
+        # a cerrar el navegador y volver a abrirlo, asi que en un ordenador
+        # compartido el siguiente que abriera el panel entraba como el anterior.
+        # El tope de verdad no es este de todas formas: el token vive en el
+        # servidor y caduca alli (ver Sesiones). Esto solo hace que el navegador
+        # no se lo guarde mas de la cuenta.
+        #
+        # Nota honesta: los navegadores con "restaurar pestanas al arrancar"
+        # pueden conservar las cookies de sesion entre arranques. Por eso el
+        # tope por inactividad del servidor es el que manda.
+        caduca = "; Max-Age=0" if borrar else ""
         return (
             "Set-Cookie",
-            f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={segundos}",
+            f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict{caduca}",
         )
 
     # --- Entrada de datos ---------------------------------------------------
@@ -1334,7 +1406,7 @@ class Manejador(BaseHTTPRequestHandler):
             self.ctx.sesiones.cerrar(self._token())
             # Max-Age=0 borra la cookie: sin esto queda un token muerto dando
             # vueltas en el navegador.
-            self._redirigir("/entrar", [self._cookie("", 0)])
+            self._redirigir("/entrar", [self._cookie("", borrar=True)])
             return
 
         try:
@@ -1385,6 +1457,12 @@ class Manejador(BaseHTTPRequestHandler):
         elif ruta == "/ajustes/fondo/quitar":
             if self._permite("ajustes.fondo"):
                 self._ajustes_fondo_quitar()
+        elif ruta == "/ajustes/mudanza":
+            self._mudanza()
+        elif ruta == "/ajustes/mudanza/subir":
+            self._subir_mudanza()
+        elif ruta == "/ajustes/mudanza/restaurar":
+            self._restaurar_mudanza()
         elif ruta == "/ajustes/datos/borrar":
             # Igual que identidades: lo comprueba el manejador, y con _editable
             # porque tira datos de la flota.
@@ -1527,7 +1605,7 @@ class Manejador(BaseHTTPRequestHandler):
         )
         if nombre == self.usuario.nombre:
             # Se acaba de cerrar su propia sesion.
-            self._redirigir("/entrar", [self._cookie("", 0)])
+            self._redirigir("/entrar", [self._cookie("", borrar=True)])
             return
         aviso = f"Cuenta {nombre} actualizada."
         if cerradas:
@@ -1659,7 +1737,7 @@ class Manejador(BaseHTTPRequestHandler):
         self._anotar("clave_propia")
         # Incluida la suya: se vuelve a entrar con la clave nueva, que ademas
         # confirma que se escribio la que se creia.
-        self._redirigir("/entrar", [self._cookie("", 0)])
+        self._redirigir("/entrar", [self._cookie("", borrar=True)])
 
     def _entrar(self) -> None:
         campos = self._campos()
@@ -1705,7 +1783,7 @@ class Manejador(BaseHTTPRequestHandler):
         token = self.ctx.sesiones.abrir(cuenta.nombre)
         log.info("Sesion abierta para %s (%s) desde %s", cuenta.nombre, cuenta.rol, ip)
         self._anotar("login_ok", f"rol {cuenta.rol}", usuario=cuenta.nombre)
-        self._redirigir("/", [self._cookie(token, self.ctx.sesiones.duracion)])
+        self._redirigir("/", [self._cookie(token)])
 
     # --- Alta, edicion y baja ----------------------------------------------
 
@@ -2303,6 +2381,7 @@ class Manejador(BaseHTTPRequestHandler):
             fondo=self._marca_fondo(),
             replica=leer_replica(self.cfg),
             huerfanos=self._huerfanos(),
+            mudanza=self._resumen_mudanza(),
             **self._contexto_identidades(),
         ), codigo)
 
@@ -2433,6 +2512,328 @@ class Manejador(BaseHTTPRequestHandler):
             aviso = (f"Quitado '{objetivo['nombre']}' del repositorio. Sus "
                      "versiones anteriores siguen en git y se pueden recuperar.")
         self._pintar_ajustes(mensaje=aviso)
+
+    def _resumen_mudanza(self) -> dict | None:
+        """Que se llevaria la copia del servidor. None si esta cuenta no la ve.
+
+        Solo se calcula para quien tiene el permiso, y no por discrecion: mide
+        el repositorio recorriendolo entero, y a esta pantalla entra tambien
+        quien solo viene a cambiar el intervalo de respaldo. Con una flota
+        grande son miles de archivos que contar para pintar un cuadro que esa
+        cuenta ni siquiera va a ver.
+        """
+        if self.usuario is None:
+            return None
+        if not self.ctx.usuarios.puede(self.usuario, "datos.mudanza"):
+            return None
+        try:
+            return mudanza.resumen(self.cfg)
+        except OSError as exc:
+            log.warning("No se pudo medir la copia del servidor: %s", exc)
+            return None
+
+    def _mudanza(self) -> None:
+        """Empaqueta este servidor entero y lo manda como descarga.
+
+        Es la respuesta mas peligrosa que da el panel: dentro van las claves
+        SSH de la flota en claro, los hashes del panel y, segun la
+        configuracion, las passwords de los clientes. De ahi que tenga permiso
+        propio, que se anote SIEMPRE en la auditoria -antes de mandar nada, no
+        despues- y que el archivo temporal nazca ya privado.
+        """
+        if not self._permite("datos.mudanza"):
+            return
+        # El formulario no lleva campos, pero SI lleva cuerpo. Sin leerlo, lo
+        # que quede en el socket lo lee la peticion siguiente como su primera
+        # linea (ver el comentario de _error).
+        if self._campos() is None:
+            return
+
+        # El programador es otro proceso y esta commiteando en el mismo
+        # repositorio. Empaquetarlo a la vez daria una copia con el arbol de
+        # git a medias: se leeria como un paquete correcto y al restaurarlo
+        # aparecerian los objetos sin la referencia que los nombra.
+        if estado_programador(self.cfg).get("corriendo"):
+            self._pintar_ajustes(
+                error="Ahora mismo hay un respaldo en marcha y esta escribiendo "
+                      "en el repositorio. Espera a que termine y vuelve a "
+                      "pedir la copia.",
+                codigo=409,
+            )
+            return
+
+        nombre = mudanza.nombre_sugerido(self.cfg)
+        lado = Path(self.cfg.almacen.estado).parent
+        temporal = lado / f".{nombre}.parcial"
+        try:
+            # Con el candado del panel: si alguien esta purgando un equipo
+            # desde otra pestana, no se empaqueta el repositorio a mitad de la
+            # reescritura.
+            with self.ctx.candado:
+                mudanza.empaquetar(self.cfg, temporal)
+            tamano = temporal.stat().st_size
+        except (mudanza.ErrorMudanza, OSError) as exc:
+            log.error("No se pudo empaquetar el servidor: %s", exc)
+            try:
+                temporal.unlink()
+            except OSError:
+                pass
+            self._pintar_ajustes(
+                error=f"No se pudo preparar la copia: {exc}", codigo=500,
+            )
+            return
+
+        # Se anota ANTES de mandarla. Si se anotara despues, una descarga que se
+        # corta a la mitad no dejaria rastro, y una copia parcial de esto sigue
+        # llevando dentro el inventario entero.
+        log.info("%s descargo la copia del servidor (%d bytes)",
+                 self.usuario.nombre, tamano)
+        self._anotar("mudanza", f"{nombre} ({tamano} bytes)")
+
+        try:
+            self._cabeceras(
+                200, "application/gzip", tamano,
+                [("Content-Disposition", f'attachment; filename="{nombre}"')],
+            )
+            with temporal.open("rb") as fh:
+                for trozo in iter(lambda: fh.read(mudanza.TROZO), b""):
+                    self.wfile.write(trozo)
+        finally:
+            # Pase lo que pase, incluida una descarga que el navegador corta a
+            # la mitad: este archivo no puede quedarse en el disco. Es una copia
+            # de las credenciales de la flota entera esperando a que alguien la
+            # encuentre.
+            try:
+                temporal.unlink()
+            except OSError as exc:
+                log.error("Quedo una copia sin borrar en %s: %s", temporal, exc)
+
+    # --- Restaurar una copia, en dos pasos ----------------------------------
+    #
+    # Primero se sube el archivo y se LEE su manifiesto; despues, en otra
+    # peticion, se confirma. Son dos y no uno por dos razones distintas:
+    #
+    #   - Se ve de que servidor viene el paquete y de cuando es ANTES de que
+    #     reemplace nada. Equivocarse de archivo aqui es sustituir la flota
+    #     entera por la de otro momento, y eso tiene que poder pararse leyendo
+    #     una linea, no descubrirse despues mirando el inventario.
+    #   - El formulario de subida lleva un unico campo, asi que el cuerpo se
+    #     puede volcar a disco segun llega, sin juntarlo en memoria. El paquete
+    #     de una flota grande son cientos de megas y este servidor no tiene ni
+    #     swap: leerlo entero a memoria seria tumbar el panel justo cuando se
+    #     esta intentando recuperarlo.
+
+    def _carpeta_datos(self) -> Path:
+        return Path(self.cfg.almacen.estado).parent
+
+    def _recibir_paquete(self, destino: Path) -> str:
+        """Vuelca a `destino` el archivo del formulario. '' si fue bien.
+
+        Parsea el multipart a mano, y puede permitirselo porque el formulario
+        tiene UN solo campo: lo que hay antes del contenido es una cabecera que
+        termina en la primera linea en blanco, y lo que hay despues es la
+        frontera de cierre. Todo lo de en medio es el archivo, y se copia por
+        trozos sin mirarlo.
+        """
+        tipo = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in tipo or "boundary=" not in tipo:
+            return "Se esperaba un archivo."
+        try:
+            largo = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            largo = -1
+        if largo <= 0:
+            return "El archivo llego vacio."
+        if largo > MAXIMO_MUDANZA:
+            return (f"El paquete pasa de {MAXIMO_MUDANZA // (1024 * 1024)} MB. "
+                    "Un archivo asi de grande se restaura desde el terminal con "
+                    "mkbackup --restaurar-datos, que no tiene este limite.")
+
+        # Hace falta sitio para el archivo, para desempaquetarlo y para apartar
+        # lo que ya hay. Sin esta comprobacion, restaurar en un servidor justo
+        # de disco lo llena a la mitad y deja el sistema sin lo viejo y sin lo
+        # nuevo, que es el peor final posible.
+        try:
+            libre = shutil.disk_usage(self._carpeta_datos()).free
+        except OSError:
+            libre = None
+        if libre is not None and libre < largo * 3:
+            return (f"No hay disco suficiente: el paquete ocupa "
+                    f"{largo // (1024 * 1024)} MB y hacen falta unas tres veces "
+                    f"eso para desempaquetarlo y apartar lo de ahora. Libres: "
+                    f"{libre // (1024 * 1024)} MB.")
+
+        frontera = tipo.split("boundary=", 1)[1].strip().strip('"').encode()
+        cierre = b"\r\n--" + frontera
+        quedan = largo
+
+        # La cabecera de la parte: como mucho unos cientos de bytes.
+        cabecera = b""
+        while b"\r\n\r\n" not in cabecera:
+            if quedan <= 0 or len(cabecera) > 8192:
+                return "El archivo llego mal formado."
+            trozo = self.rfile.read(min(4096, quedan))
+            if not trozo:
+                return "La subida se corto antes de tiempo."
+            quedan -= len(trozo)
+            cabecera += trozo
+        _, resto = cabecera.split(b"\r\n\r\n", 1)
+
+        escritos = 0
+        descriptor = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as fh:
+            fh.write(resto)
+            escritos += len(resto)
+            while quedan > 0:
+                trozo = self.rfile.read(min(mudanza.TROZO, quedan))
+                if not trozo:
+                    return "La subida se corto antes de tiempo."
+                quedan -= len(trozo)
+                fh.write(trozo)
+                escritos += len(trozo)
+
+        # Y se le quita la frontera de cierre, que viaja pegada al final. Se
+        # busca desde atras en una ventana pequena en vez de dar por hecho su
+        # longitud exacta: hay clientes que anaden el salto de linea final y
+        # otros que no, y sobrarle o faltarle dos bytes al .tar.gz lo rompe.
+        ventana = min(escritos, len(cierre) + 16)
+        with open(destino, "r+b") as fh:
+            fh.seek(escritos - ventana)
+            cola = fh.read(ventana)
+            corte = cola.rfind(cierre)
+            if corte < 0:
+                return "El archivo llego mal formado."
+            fh.truncate(escritos - ventana + corte)
+        return ""
+
+    def _limpiar_subidas(self) -> None:
+        """Tira los paquetes subidos que nadie llego a confirmar.
+
+        Se quedan ahi si alguien sube un archivo, ve de que servidor es y
+        cierra la pestana. Son copias completas del sistema con todas sus
+        credenciales: no pueden acumularse en el disco esperando a nadie.
+        """
+        limite = time.time() - 3600
+        for viejo in self._carpeta_datos().glob(f"{PREFIJO_SUBIDA}*"):
+            try:
+                if viejo.stat().st_mtime < limite:
+                    viejo.unlink()
+            except OSError:
+                continue
+
+    def _subir_mudanza(self) -> None:
+        """Recibe un paquete y ensena lo que trae, sin restaurar nada todavia."""
+        if not self._editable("datos.mudanza"):
+            return
+
+        self._limpiar_subidas()
+        vale = secrets.token_hex(16)
+        destino = self._carpeta_datos() / f"{PREFIJO_SUBIDA}{vale}.tar.gz"
+        fallo = self._recibir_paquete(destino)
+        if fallo:
+            try:
+                destino.unlink()
+            except OSError:
+                pass
+            self._pintar_ajustes(error=fallo, codigo=400)
+            return
+
+        # Se lee el manifiesto YA. Un archivo que no es un paquete de mkbackup,
+        # o que llego a medias, se caza aqui y no despues de haber apartado los
+        # datos buenos.
+        try:
+            manifiesto = mudanza.leer_manifiesto(destino)
+        except mudanza.ErrorMudanza as exc:
+            try:
+                destino.unlink()
+            except OSError:
+                pass
+            self._pintar_ajustes(error=str(exc), codigo=400)
+            return
+
+        log.info("%s subio un paquete de '%s' (%s)", self.usuario.nombre,
+                 manifiesto.get("servidor"), manifiesto.get("cuando"))
+        self._html(paginas.confirmar_mudanza(
+            vale, manifiesto, destino.stat().st_size,
+            sesion=self._para_pintar(self.usuario), zona=self.ctx.zona,
+        ))
+
+    def _restaurar_mudanza(self) -> None:
+        """Vuelca el paquete que se subio antes. Reemplaza el sistema entero."""
+        if not self._editable("datos.mudanza"):
+            return
+        campos = self._campos()
+        if campos is None:
+            return
+
+        # El vale es un nombre de archivo compuesto por el propio panel. Se
+        # comprueba que solo tenga hexadecimal antes de pegarlo a una ruta: si
+        # no, escribirle puntos y barras seria elegir cualquier archivo del
+        # disco como paquete a restaurar.
+        vale = campos.get("vale", "")
+        if not vale or len(vale) != 32 or any(c not in "0123456789abcdef" for c in vale):
+            self._pintar_ajustes(error="La subida ya no vale. Subela otra vez.",
+                                 codigo=400)
+            return
+        paquete = self._carpeta_datos() / f"{PREFIJO_SUBIDA}{vale}.tar.gz"
+        if not paquete.is_file():
+            self._pintar_ajustes(
+                error="Esa subida ya no esta: se limpian solas al cabo de una "
+                      "hora. Vuelve a subir el archivo.",
+                codigo=404,
+            )
+            return
+
+        if campos.get("confirmacion", "").strip() != PALABRA_RESTAURAR:
+            self._pintar_ajustes(
+                error=f"Para reemplazar todo hay que escribir "
+                      f"'{PALABRA_RESTAURAR}' en el campo de confirmacion. No "
+                      "se ha tocado nada.",
+                codigo=400,
+            )
+            return
+
+        if estado_programador(self.cfg).get("corriendo"):
+            self._pintar_ajustes(
+                error="Hay un respaldo en marcha escribiendo en el repositorio "
+                      "que esto va a reemplazar. Espera a que termine.",
+                codigo=409,
+            )
+            return
+
+        # Se anota ANTES: si la restauracion sale a medias, el registro tiene
+        # que decir quien la lanzo. Ademas el archivo de auditoria es una de las
+        # piezas que se reemplazan, o sea que esta linea se pierde y queda la
+        # del servidor de origen; por eso va tambien al log del servicio, que
+        # no lo toca nadie.
+        log.warning("%s esta restaurando una copia completa del servidor",
+                    self.usuario.nombre)
+        self._anotar("mudanza_restaurada", paquete.name)
+
+        try:
+            with self.ctx.candado:
+                hecho = mudanza.restaurar(self.cfg, paquete, sobrescribir=True)
+        except (mudanza.ErrorMudanza, OSError) as exc:
+            log.error("No se pudo restaurar: %s", exc)
+            self._pintar_ajustes(error=f"No se restauro nada: {exc}", codigo=500)
+            return
+        finally:
+            try:
+                paquete.unlink()
+            except OSError:
+                pass
+
+        log.warning("Restauradas %d piezas; lo anterior quedo en %s",
+                    len(hecho["puestas"]), ", ".join(hecho["apartadas"]) or "-")
+        for aviso in hecho["avisos"]:
+            log.warning("%s", aviso)
+
+        # Se echa a todo el mundo, incluido quien acaba de hacerlo. El archivo
+        # de cuentas es otro: los tokens que hay en memoria pertenecen a
+        # usuarios que quiza ya no existen o que ahora tienen otro rol, y
+        # dejarlos dentro seria conservar unos permisos que ya no dice nadie.
+        self.ctx.sesiones.cerrar_todas()
+        self._html(paginas.mudanza_hecha(hecho), 200)
 
     def _contexto_identidades(self) -> dict:
         """Lo que sabe la pantalla sobre los nombres de los routers.
@@ -2827,6 +3228,7 @@ def servir(cfg: Config) -> int:
 
     sesiones = Sesiones(
         duracion_horas=cfg.web.sesion_horas,
+        inactividad_minutos=cfg.web.sesion_minutos,
         intentos_max=cfg.web.intentos_max,
         bloqueo_segundos=cfg.web.bloqueo_segundos,
     )

@@ -129,7 +129,20 @@ class ConfigWeb:
     # con `mkbackup --hash-clave`. Sin clave_hash el panel no arranca.
     usuario: str = "admin"
     clave_hash: str = ""
-    # Cuanto dura la sesion antes de volver a pedir la clave.
+    # Cuanto dura la sesion antes de volver a pedir la clave. Son dos topes y
+    # el que primero llegue cierra:
+    #
+    #   sesion_minutos -> SIN ACTIVIDAD. Se reinicia cada vez que se usa el
+    #     panel de verdad; el refresco automatico de la pantalla de Estado no
+    #     cuenta (ver sesion.Sesiones.valida). Es el que protege un puesto que
+    #     alguien dejo abierto y se fue.
+    #   sesion_horas -> TOPE ABSOLUTO. Aunque se este usando sin parar, pasadas
+    #     estas horas hay que volver a escribir la clave. Es el que acota lo
+    #     que sirve una sesion robada.
+    #
+    # Ademas la cookie no lleva fecha de caducidad, asi que cerrar el navegador
+    # cierra la sesion en ese mismo momento.
+    sesion_minutos: int = 30
     sesion_horas: int = 8
     # Freno a la fuerza bruta: tras N fallos, esa IP espera.
     intentos_max: int = 5
@@ -457,6 +470,19 @@ class Config:
             raise ErrorConfig("web.usuario no puede estar vacio")
         if self.web.sesion_horas < 1:
             raise ErrorConfig("web.sesion_horas debe ser al menos 1")
+        if self.web.sesion_minutos < 1:
+            raise ErrorConfig("web.sesion_minutos debe ser al menos 1")
+        # Un tope por inactividad mas largo que el absoluto no llega a aplicarse
+        # nunca: es una configuracion que dice una cosa y hace otra, y quien la
+        # escriba se quedara convencido de que las sesiones caducan por estar
+        # quietas cuando en realidad solo caducan por vejez.
+        if self.web.sesion_minutos * 60 > self.web.sesion_horas * 3600:
+            raise ErrorConfig(
+                f"web.sesion_minutos ({self.web.sesion_minutos}) no puede pasar "
+                f"de web.sesion_horas ({self.web.sesion_horas} h = "
+                f"{self.web.sesion_horas * 60} min): el tope por inactividad "
+                "tiene que caer antes que el absoluto para servir de algo"
+            )
         if self.web.intentos_max < 1:
             raise ErrorConfig("web.intentos_max debe ser al menos 1")
         if self.web.bloqueo_segundos < 0:

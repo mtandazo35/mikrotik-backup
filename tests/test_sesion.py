@@ -217,19 +217,55 @@ def main() -> None:
     comprobar("y el token del borrado no revive al reabrir otra sesion suya",
               e.abrir("temporal") != borrado and e.valida(borrado) is None)
 
-    # 7. Caducidad, con el reloj de mentira.
-    r = SesionesReloj(duracion_horas=8)
+    # 7. Caducidad, con el reloj de mentira. Son DOS topes y se prueban por
+    # separado, porque protegen de cosas distintas: el de inactividad, del
+    # puesto que alguien deja abierto y se va; el absoluto, de una sesion
+    # robada que se mantiene caliente a base de usarla.
+
+    # 7a. Por inactividad: media hora sin tocar nada y fuera. Y usarla reinicia
+    # la cuenta atras, que es lo que hace que trabajar no te eche.
+    q = SesionesReloj(duracion_horas=8, inactividad_minutos=30)
+    quieto = q.abrir("ana")
+    q.avanzar(29 * 60)
+    comprobar("a los 29 minutos quieta la sesion sigue viva",
+              q.valida(quieto) == "ana")
+    q.avanzar(29 * 60)
+    comprobar("y usarla reinicia la cuenta atras", q.valida(quieto) == "ana")
+    q.avanzar(30 * 60 + 1)
+    comprobar("media hora sin tocar nada la cierra", not q.valida(quieto))
+    # El token caducado no puede quedarse ocupando memoria para siempre.
+    comprobar("el token caducado se tira del diccionario",
+              quieto not in q._abiertas)
+
+    # 7b. El refresco automatico NO cuenta como actividad. Esta es la prueba
+    # que sostiene todo lo anterior: la pantalla de Estado pregunta sola cada
+    # pocos segundos, asi que si esas peticiones reiniciaran el reloj bastaria
+    # con dejar una pestana abierta para que la sesion no caducara nunca y el
+    # tope de media hora seria decorativo.
+    p = SesionesReloj(duracion_horas=8, inactividad_minutos=30)
+    pestana = p.abrir("ana")
+    for _ in range(20):
+        p.avanzar(2 * 60)
+        p.valida(pestana, refrescar=False)
+    comprobar("una pestana que solo se refresca sola no mantiene viva la sesion",
+              p.valida(pestana) is None)
+
+    # 7c. Tope absoluto: aunque se use sin parar, a las 8 horas toca volver a
+    # escribir la clave.
+    r = SesionesReloj(duracion_horas=8, inactividad_minutos=30)
     viejo = r.abrir("ana")
-    r.avanzar(7 * 3600)
-    comprobar("a las 7 horas la sesion sigue viva", r.valida(viejo) == "ana")
-    r.avanzar(3600 + 1)
-    comprobar("pasadas las 8 horas la sesion caduca", not r.valida(viejo))
+    for _ in range(28):
+        r.avanzar(15 * 60)
+        r.valida(viejo)
+    comprobar("usandola cada rato aguanta las 7 horas", r.valida(viejo) == "ana")
+    for _ in range(5):
+        r.avanzar(15 * 60)
+        r.valida(viejo)
+    comprobar("pero pasadas las 8 horas caduca igual aunque se este usando",
+              not r.valida(viejo))
     nuevo = r.abrir("ana")
     comprobar("y se puede abrir otra despues de caducar la anterior",
               r.valida(nuevo) == "ana" and nuevo != viejo)
-    # El token caducado no puede quedarse ocupando memoria para siempre.
-    comprobar("el token caducado se tira del diccionario",
-              viejo not in r._abiertas)
 
     # 8. Freno a la fuerza bruta.
     f = SesionesReloj(intentos_max=5, bloqueo_segundos=300)
