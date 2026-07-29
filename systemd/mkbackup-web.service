@@ -25,9 +25,20 @@ ProtectSystem=strict
 ProtectHome=false
 
 # El panel ya NO es de solo lectura: da de alta equipos, asi que necesita
-# escribir el inventario, y guarda los ajustes que se cambian desde la web.
-# Sigue SIN poder tocar config.yaml (credenciales generales y rutas): eso es
-# a mano y con un editor.
+# escribir el inventario, y guarda los ajustes que se cambian desde la web, las
+# cuentas, el registro de auditoria y la imagen de fondo del login.
+#
+# Y hay que decirlo entero, porque esta linea ya no acota lo que parece: con el
+# permiso 'datos.mudanza', una cuenta del panel puede SUBIR un .tar.gz y
+# reemplazar con el TODO lo que hay en esta carpeta -el historico completo, el
+# inventario, las cuentas y hasta el propio config.yaml, que es una de las
+# piezas del paquete-. O sea que esto no es "escribe algunos archivos suyos":
+# es "puede sustituir el servidor entero por otro". Lo que queda fuera del
+# alcance del panel es solo lo que este FUERA de esta ruta.
+#
+# Que config.yaml viva aqui dentro es lo que hace que la mudanza funcione en
+# una maquina nueva, y a la vez lo que hace que ese permiso pese tanto: se da
+# a quien administra el servidor, no a quien mira la flota.
 ReadWritePaths=/root/mkbackup
 
 ProtectKernelTunables=true

@@ -115,8 +115,11 @@ Verificado:
   `/system identity` y entra con él; el que no responde entra con su IP y el
   primer respaldo correcto lo renombra solo, moviendo su histórico con `git mv`
 - **Cuentas, roles, permisos y alcance por empresa** (`tests/test_usuarios.py`),
-  incluida la invariante del último administrador total y la migración del
-  archivo de usuarios del formato 1 al 2
+  incluida la invariante del último administrador total y las migraciones del
+  archivo de usuarios, que va ya por el **formato 4** (ver
+  [Cuentas, roles y permisos](#cuentas-roles-y-permisos))
+- **Llevarse el servidor a otra máquina** (`tests/test_mudanza.py`): empaquetar,
+  restaurar sobre datos de verdad y que el destino quede igual que el origen
 - **Lo que se sabe de cada equipo** —modelo, versión, último respaldo bueno— y
   la regla de que un dato vacío nunca pisa uno bueno (`tests/test_hechos.py`)
 - **Importación** de plantillas CSV y `.xlsx`, **diffs enmascarados** y el
@@ -215,9 +218,12 @@ ruido no cuente como cambio, y que un cambio real sí se detecte.
 
 ### Todo vive bajo /root, y lo que eso cuesta
 
-Los datos —repositorio git, binarios, inventario, `estado.json`,
-`ajustes.json`, `usuarios.json`, `equipos.json`, `auditoria.log`— van a
-**`/root/mkbackup`**, y las dos unidades de systemd corren con `User=root`,
+Los datos —repositorio git (`configs.git/`), binarios, inventario,
+`estado.json`, `ajustes.json`, `usuarios.json`, `equipos.json`,
+`programador.json`, `replica.json`, `auditoria.log` y la imagen de fondo del
+login— van a **`/root/mkbackup`** (la lista completa, con quién escribe cada
+uno, está en [Estructura](#estructura)), y las dos unidades de systemd corren
+con `User=root`,
 `ProtectHome=false` y `ReadWritePaths=/root/mkbackup`. Es lo que se decidió
 para este despliegue, y el intercambio conviene tenerlo claro:
 
@@ -574,7 +580,8 @@ de ahí, las claves se cambian **desde el propio panel** (cada cuenta la suya en
 |---|---|---|
 | `usuario` | `admin` | La cuenta que se siembra en el archivo de usuarios la primera vez. Después manda ese archivo. |
 | `clave_hash` | *(vacío)* | El hash de `--hash-clave`. Vacío = el panel no arranca. |
-| `sesion_horas` | `8` | Cuánto dura la sesión antes de volver a pedir la clave. |
+| `sesion_minutos` | `30` | Minutos **sin actividad** antes de cerrar la sesión. Se reinicia al usar el panel. |
+| `sesion_horas` | `8` | **Tope absoluto** de la sesión, se esté usando o no. |
 | `intentos_max` | `5` | Fallos seguidos desde una IP antes de frenarla. |
 | `bloqueo_segundos` | `300` | Lo que espera esa IP tras pasarse de intentos. |
 | `eventos_por_pagina` | `30` | Eventos por página en la auditoría. |
@@ -584,8 +591,21 @@ El bloqueo es **por IP** y en memoria: cinco intentos fallidos y esa dirección
 queda cinco minutos fuera, con la respuesta 429 diciendo cuánto le falta. Un
 acierto borra su contador, y desde `/auditoria` se puede levantar a mano.
 
-La sesión es una cookie `HttpOnly`, `SameSite=Strict` y con `Max-Age` igual a
-`sesion_horas`; el token es opaco y vive en memoria del proceso, no firmado. El
+**La sesión tiene dos relojes y cierra el que llegue primero.**
+`sesion_minutos` (30) es el de **inactividad**: se reinicia cada vez que se usa
+el panel de verdad, y el refresco automático de la pantalla de Estado **no
+cuenta** —si contara, una pestaña olvidada en un ordenador encendido mantendría
+la sesión viva para siempre, que es justo la situación contra la que existe—.
+`sesion_horas` (8) es el **tope absoluto**: aunque se esté trabajando sin parar,
+pasadas esas horas hay que volver a escribir la clave, y eso acota lo que sirve
+una sesión robada. `sesion_minutos` no puede pasar de `sesion_horas`: el panel
+se niega a arrancar en vez de aplicar un tope que nunca se alcanzaría.
+
+La sesión es una cookie `HttpOnly` y `SameSite=Strict`, **sin `Max-Age`**: es
+una cookie de sesión del navegador, así que cerrar el navegador la borra en ese
+mismo momento. Con `Max-Age` la cookie sobrevivía al navegador cerrado, que en
+un puesto compartido es exactamente lo que no se quiere. El token es opaco y
+vive en memoria del proceso, no firmado. El
 precio de eso es que **reiniciar el panel cierra las sesiones abiertas**; a
 cambio, "Salir" —y sobre todo echar a alguien— las cierra de verdad y no queda
 un token válido dando vueltas. `SameSite=Strict` es además lo que protege las
@@ -616,20 +636,82 @@ misma clave la primera vez que arranca el panel nuevo (`sembrar`), con el rol
 `admin` y acceso a todo. Sin eso, actualizar dejaría a la gente fuera de su
 propio panel. A partir de ahí manda el archivo de usuarios.
 
-Hay **ocho permisos** (`PERMISOS` y `ETIQUETAS_PERMISO` en
-`mkbackup/usuarios.py`). Es una lista cerrada a propósito: un permiso que solo
-existiera en el archivo de un cliente no lo comprobaría nadie.
+**El archivo va por el formato 4**, y las migraciones son automáticas al leerlo
+(`FORMATO` y `_migrar` en `usuarios.py`). La regla de todas ellas es la misma:
+*a nadie se le cambian los permisos por actualizar*.
 
-| Permiso | Qué abre |
-|---|---|
-| `ver` | Ver equipos, estado y cambios |
-| `diferencias` | Ver el contenido de los cambios (diffs) |
-| `equipos.crear` | Añadir equipos |
-| `equipos.editar` | Editar equipos |
-| `equipos.baja` | Dar de baja equipos |
-| `equipos.importar` | Importar desde Excel |
-| `ajustes` | Cambiar los ajustes del programador |
-| `usuarios` | Gestionar usuarios y roles (y ver la auditoría) |
+| Formato | Qué trajo | Qué hace la migración |
+|---|---|---|
+| 1 | Tres roles fijos en el código, sin alcance ni excepciones. | — |
+| 2 | Los roles pasan a ser **datos**, más `permisos_mas` / `permisos_menos` y alcance por usuario. | Se escriben los tres roles de siempre y cada cuenta conserva el suyo con `alcance.todo` — en el formato 1 no había alcance, o sea que todo el mundo veía todos los equipos. |
+| 3 | **Permisos finos**: `ver`, `ajustes` y `usuarios` se parten en uno por pantalla y por acción. | Se traducen los tres permisos gruesos a los finos equivalentes (`EQUIVALENCIAS`), en los roles y en las excepciones de cada cuenta. Es obligatorio, no cosmético: un permiso desconocido se ignora, así que sin traducir, `usuarios` dejaría de contar y el panel se quedaría **sin ningún administrador**. |
+| 4 | Aparece `datos.mudanza`: descargar una copia entera del servidor. | Se le da **solo al rol que ya tenía los 24 permisos anteriores** (`PERMISOS_FORMATO_3`), y a ninguno más. |
+
+Que la exclusión también se traduzca importa tanto como la concesión: quien
+tenía **quitado** `ajustes` sigue sin poder entrar a Ajustes, y eso ahora son
+ocho permisos. Traducir solo los `mas` le devolvería en silencio un acceso que
+alguien le retiró a propósito.
+
+Hay **veinticinco permisos** (`AREAS`, `PERMISOS` y `ETIQUETAS_PERMISO` en
+`mkbackup/usuarios.py`). Es una lista cerrada a propósito: un permiso que solo
+existiera en el archivo de un cliente no lo comprobaría nadie. Van agrupados
+por área porque así se pintan en la pantalla de roles —treinta casillas
+seguidas no se entienden— y el orden es de menos a más peligroso: primero
+mirar, luego tocar la flota, luego la configuración y al final las cuentas.
+
+| Área | Permiso | Qué abre |
+|---|---|---|
+| **Consultar** | `estado.ver` | Ver la pantalla de Estado |
+| | `equipos.ver` | Ver la lista de equipos |
+| | `cambios.ver` | Ver la lista de cambios |
+| | `diferencias` | Ver el contenido de los cambios (diffs) |
+| **La flota** | `equipos.crear` | Añadir equipos |
+| | `equipos.editar` | Editar equipos |
+| | `equipos.baja` | Dar de baja equipos |
+| | `equipos.importar` | Importar desde Excel |
+| | `equipos.identidades` | Preguntarle el nombre a los routers |
+| **Ajustes** | `ajustes.ver` | Abrir la pantalla de Ajustes |
+| | `ajustes.programador` | Cambiar cada cuánto se respalda |
+| | `ajustes.respaldar` | Lanzar un respaldo ahora |
+| | `ajustes.ssh` | Cambiar el acceso SSH a los routers |
+| | `ajustes.remoto` | Cambiar a dónde se suben los respaldos |
+| | `ajustes.fondo` | Cambiar la imagen de la pantalla de entrada |
+| | `datos.borrar` | BORRAR los respaldos de un equipo |
+| | `datos.mudanza` | DESCARGAR una copia entera del servidor |
+| **Cuentas y registro** | `usuarios.ver` | Ver las cuentas y los roles |
+| | `usuarios.crear` | Añadir cuentas |
+| | `usuarios.editar` | Editar cuentas (rol, permisos y alcance) |
+| | `usuarios.baja` | Borrar cuentas |
+| | `roles.editar` | Crear y editar roles |
+| | `roles.baja` | Borrar roles |
+| | `auditoria.ver` | Ver el registro de auditoría |
+| | `auditoria.desbloquear` | Desbloquear direcciones IP |
+
+**Un permiso arrastra el de ver su pantalla** (`HERENCIA`): quien puede editar
+equipos ve la lista de equipos, quien puede tocar cualquier cosa de Ajustes
+tiene `ajustes.ver`, quien desbloquea IPs ve la auditoría. Se aplica al
+calcular los efectivos y no al guardar, para que la casilla que alguien marcó
+siga siendo la que ve marcada. Sin eso quedan roles que "pueden editar equipos"
+y reciben un 403 en la pantalla que esa misma persona acaba de habilitar, y eso
+no se lee como una configuración estricta sino como un panel roto.
+
+#### Por qué `datos.mudanza` va aparte
+
+`datos.mudanza` se pinta en Ajustes, pero **no se reparte con el resto del
+área**, y es deliberado: quien cambia cada cuánto se respalda no tiene por qué
+poder descargarse las credenciales de la flota entera. Por eso tampoco se
+tradujo con `EQUIVALENCIAS` como los permisos gruesos del formato 2 — aquello
+traducía permisos que la gente **ya** tenía; esto es uno nuevo que no tenía
+nadie, y un permiso que descarga las claves de todos los clientes no se regala a
+quien resulte que encaja en una equivalencia. Al **quitar** sí va incluido
+(`EQUIVALENCIAS_AL_QUITAR`): excluir a alguien de Ajustes tiene que excluirlo
+del área entera, incluido lo que se añadió después.
+
+Además **exige alcance total**, no solo el permiso. La copia es del servidor
+entero —no existe la copia de un solo cliente—, así que sin esa segunda
+comprobación una cuenta limitada a una empresa se llevaría de una vez justo lo
+que el alcance le niega equipo a equipo. Ver
+[Mudarse a otro servidor](#mudarse-a-otro-servidor).
 
 **Los roles son plantillas editables**, no constantes del código: se crean, se
 editan y se borran desde el panel. Una instalación nueva arranca con `admin`,
@@ -657,8 +739,13 @@ caducara, que es justo el rato en el que hace falta que no lo esté.
 
 #### La invariante: el último administrador total
 
-> **Siempre tiene que quedar al menos un usuario que tenga a la vez el permiso
-> `usuarios` y alcance a todo.**
+> **Siempre tiene que quedar al menos un usuario que tenga a la vez los
+> permisos `usuarios.ver` y `usuarios.editar` (`LLAVES`) y alcance a todo.**
+
+Son los dos y hacen falta los dos: `usuarios.editar` es lo que permite
+devolverle el rol o el permiso a alguien, y `usuarios.ver` es lo que permite
+llegar a esa pantalla. Con uno solo queda una cuenta que teóricamente manda
+pero no encuentra la puerta, que a efectos prácticos es un panel cerrado.
 
 Ese es el único que puede volver a repartirlo todo: crear cuentas, arreglar
 roles y dar acceso a cualquier empresa. Sin ninguno, el panel se queda sin
@@ -666,8 +753,8 @@ llaves y la única salida es editar el JSON a mano por SSH.
 
 Se protege en **todas** las operaciones que podrían romperla, incluidas las
 indirectas: borrar esa cuenta, cambiarle el rol, quitarle el permiso con
-`permisos_menos`, recortarle el alcance, **quitarle el permiso `usuarios` al rol
-que se lo daba**, o borrar ese rol. No se mira "qué campo cambió": se calcula
+`permisos_menos`, recortarle el alcance, **quitarle esos permisos al rol
+que se los daba**, o borrar ese rol. No se mira "qué campo cambió": se calcula
 cómo quedaría el sistema entero y se pregunta si sigue habiendo llaves.
 
 Un detalle deliberado: si el archivo ya llegó sin ningún administrador total
@@ -764,12 +851,49 @@ que es la pregunta de después de un incidente. Por eso es un archivo aparte:
 `0600` y **una línea JSON por evento** (fecha UTC, evento, usuario, IP,
 detalle), para poder filtrarla sin analizar texto libre.
 
-Se guardan los accesos (`login_ok`, `login_fallido`, `login_bloqueado`,
-`salir`, `desbloqueo`, `clave_propia`), los intentos rechazados (`sin_permiso`,
-`fuera_de_alcance`) y los cambios: cuentas (`usuario_alta`, `usuario_cambio`,
-`usuario_baja`), roles (`rol_cambio`, `rol_baja`), inventario (`equipo_alta`,
-`equipo_cambio`, `equipo_baja`, `datos_borrados`, `importacion`) y configuración
-(`ajustes`, `acceso_ssh`).
+La lista entera de eventos es `EVENTOS` en `mkbackup/auditoria.py`:
+
+| Grupo | Evento | Qué fue |
+|---|---|---|
+| **Accesos** | `login_ok` | Entró al panel |
+| | `login_fallido` | Intento fallido |
+| | `login_bloqueado` | Bloqueado por intentos |
+| | `desbloqueo` | Desbloqueó una dirección |
+| | `salir` | Cerró sesión |
+| | `sin_pantallas` | Entró sin permiso para ver nada |
+| **Rechazos** | `sin_permiso` | Intentó algo sin permiso |
+| | `fuera_de_alcance` | Intentó ver algo fuera de su alcance |
+| **Cuentas** | `clave_propia` | Cambió su propia clave |
+| | `usuario_alta` | Creó una cuenta |
+| | `usuario_cambio` | Modificó una cuenta |
+| | `usuario_baja` | Borró una cuenta |
+| | `rol_cambio` | Modificó un rol |
+| | `rol_baja` | Borró un rol |
+| **La flota** | `equipo_alta` | Dio de alta un equipo |
+| | `equipo_cambio` | Editó un equipo |
+| | `equipo_baja` | Dio de baja un equipo |
+| | `importacion` | Importó equipos |
+| | `identidades` | Le preguntó el nombre a los routers |
+| | `datos_borrados` | Borró los respaldos de un equipo |
+| **Configuración** | `ajustes` | Cambió los ajustes |
+| | `acceso_ssh` | Cambió el acceso a los routers |
+| | `respaldo_manual` | Pidió un respaldo inmediato |
+| | `remoto` | Cambió a dónde se suben los respaldos |
+| | `remoto_prueba` | Probó la conexión con el repositorio |
+| **El servidor entero** | `mudanza` | Descargó una copia de todo el servidor |
+| | `mudanza_restaurada` | **RESTAURÓ** una copia sobre este servidor |
+
+`mudanza` es el evento más importante del registro: ese archivo lleva dentro el
+inventario con las claves de los routers, las cuentas del panel y el histórico
+completo. Quien lo tiene, tiene la red. Y `mudanza_restaurada` es el único que
+casi siempre **se pierde** —el registro es una de las piezas que se
+reemplazan—, así que va también al log del servicio, que no lo toca nadie.
+
+`sin_pantallas` tiene etiqueta propia porque no es un intento de colarse: es
+alguien a quien se le creó la cuenta y se olvidó darle acceso, y eso solo se
+distingue en el registro si se llama distinto. Los cuatro que dibujan un intento
+de entrar sin permiso —`login_fallido`, `login_bloqueado`, `sin_permiso` y
+`fuera_de_alcance`— son los `SOSPECHOSOS`, el filtro de la pantalla.
 
 **Nunca guarda claves**, ni hashes, ni tokens de sesión. De un cambio de
 credenciales SSH se anota que cambió y quién, no el valor. Sí se anota el nombre
@@ -782,16 +906,16 @@ El archivo **se rota solo** al llegar a 5 MB (del orden de 30.000 eventos) y
 conserva una generación anterior en `.log.1`. Quien necesite historia larga que
 se lo lleve a donde guarde los logs de verdad.
 
-La pantalla `/auditoria` —mismo permiso que gestionar cuentas: quien puede crear
-usuarios es quien tiene que poder ver qué se ha hecho con ellos— filtra por tipo
+La pantalla `/auditoria` —permiso `auditoria.ver`— filtra por tipo
 de evento, por usuario y por "solo sospechosos", con paginación de
 `web.eventos_por_pagina` eventos (30 por defecto). Si se pide una página que no
 existe se enseña la última completa, y el título dice el rango real en vez de
 mentir. Los intentos fallidos y los bloqueos van en rojo.
 
 Arriba hay una tabla de **direcciones con intentos fallidos**, con cuántos lleva
-cada una y cuánto le queda de bloqueo, y un botón **Desbloquear** para el caso
-del despiste — cinco errores de teclado no tienen por qué costar cinco minutos.
+cada una y cuánto le queda de bloqueo, y un botón **Desbloquear** —permiso
+aparte, `auditoria.desbloquear`, que arrastra `auditoria.ver`— para el caso
+del despiste: cinco errores de teclado no tienen por qué costar cinco minutos.
 Se listan también las que **aún no** llegaron al límite: ver "3 de 5 intentos"
 es lo que permite darse cuenta de que algo pasa antes de que salte el bloqueo.
 
@@ -1040,7 +1164,9 @@ Tres frenos, porque esto no tiene marcha atrás:
 - **Con un ciclo en marcha se niega** (409). El programador es otro proceso
   escribiendo en ese mismo repositorio, y purgar lo reescribe entero.
 
-Hacen falta los dos permisos, `ajustes` y `equipos.baja`, y queda en la
+Hace falta el permiso `datos.borrar`, que es suyo y no `equipos.baja` porque son
+cosas distintas: dar de baja deja los respaldos donde están, y esto los saca del
+repositorio. Queda en la
 auditoría como `datos_borrados` con la ruta y la forma. En **multitenant** solo
 lo ve quien lo ve todo: un equipo dado de baja ya no está en el inventario y no
 se le puede calcular el alcance, la misma regla que en `/cambios`. Adivinar la
@@ -1218,27 +1344,52 @@ cualquiera que entre.
 
 ### Ajustes desde el panel
 
-`/ajustes` (permiso `ajustes`) cambia cuatro cosas **sin reiniciar nada y sin
-reescribir ninguna unidad de systemd**:
+`/ajustes` (permiso `ajustes.ver` para abrirla) son **siete tarjetas**, y cada
+una aparece solo si la cuenta tiene su permiso. Se toca todo **sin reiniciar
+nada y sin reescribir ninguna unidad de systemd**:
 
-1. **Cada cuánto se respalda.** El intervalo **general** del programador
+1. **Cada cuánto se respalda** (`ajustes.programador`). El intervalo **general**
+   del programador
    (`intervalo_minutos`, el que heredan los equipos que no traen el suyo) y si
    se respalda nada más arrancar (`al_arrancar`). El programador relee los
    ajustes mientras espera, así que bajar de 4 horas a 30 minutos surte efecto
    en el momento y no dentro de 4 horas, que es justo cuando alguien está
-   esperando a ver si funcionó.
-2. **Las credenciales SSH generales.** Usuario y clave con los que se entra a
+   esperando a ver si funcionó. En esa misma tarjeta está **Respaldar ahora**
+   (`ajustes.respaldar`), en su propio formulario y no como un segundo botón del
+   otro: pedir un respaldo no debe guardar de paso un intervalo que se estaba
+   tecleando a medias, ni al revés, y además son permisos distintos.
+2. **Las credenciales SSH generales** (`ajustes.ssh`). Usuario y clave con los
+   que se entra a
    cualquier equipo que no traiga las suyas — lo que hay que cambiar cuando se
    rota la clave de la flota. El usuario no puede quedar vacío; la clave vacía
    significa "no la toques", porque guardar la cadena vacía dejaría a la flota
    entera sin credencial. La clave **no se manda al navegador ni para rellenar
    el campo**, pero sí se dice si hay alguna puesta: un campo vacío sin más no
    distingue "no la toques" de "no hay ninguna".
-3. **A dónde se suben los respaldos.** La dirección del repositorio remoto, la
+3. **El nombre de los routers** (`equipos.identidades`): preguntarle su
+   `/system identity` a toda la flota de una vez. Ver
+   [Preguntarle el nombre a toda la flota](#preguntarle-el-nombre-a-toda-la-flota).
+4. **A dónde se suben los respaldos** (`ajustes.remoto`). La dirección del
+   repositorio remoto, la
    rama, cada cuántos ciclos con cambios se sube, el usuario y el token, con un
    botón para probar la conexión en el momento. Tiene sección propia: ver
    [Subir los respaldos fuera del servidor](#subir-los-respaldos-fuera-del-servidor).
-4. **El fondo de la pantalla de entrada** (ver arriba).
+5. **Mudarse a otro servidor** (`datos.mudanza`, y además alcance total).
+   Descargar el servidor entero en un `.tar.gz` y volcar aquí uno de otra
+   máquina. Va justo detrás del remoto a propósito: los dos hablan de sacar una
+   copia de esta máquina, y quien está pensando en "qué pasa si pierdo el
+   servidor" tiene las dos respuestas seguidas — el remoto contesta "conservo el
+   histórico" y esto, "levanto el sistema entero en otro sitio", que no es lo
+   mismo y suele confundirse. Tiene sección propia: ver
+   [Mudarse a otro servidor](#mudarse-a-otro-servidor).
+6. **El fondo de la pantalla de entrada** (`ajustes.fondo`, ver arriba).
+7. **Borrar los datos de un equipo** (`datos.borrar`), a lo ancho y fuera del
+   mosaico porque lleva una tabla de cinco columnas. Ver
+   [Borrar los datos de un equipo](#borrar-los-datos-de-un-equipo).
+
+Con `ajustes.ver` y nada más la pantalla se abre pero no hay ningún formulario
+que rellenar, y **se dice**: una página en blanco se lee como un panel roto, y
+lo que falta ahí son permisos que alguien tiene que dar.
 
 Lo que se cambia en el panel **no se escribe en el YAML**: va a
 `almacen.ajustes` (`/root/mkbackup/ajustes.json` por defecto) y **manda sobre
@@ -1319,11 +1470,10 @@ forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
 
 ### Lo que el panel no hace, a propósito
 
-- **No lanza respaldos.** Un botón "respaldar ahora" convierte una página de
-  consulta en algo que toca 300 equipos de golpe. El disparo es del programador;
-  desde aquí solo se cambia cada cuánto.
 - **No restaura equipos.** Ni el `.rsc` ni el `.backup`. Eso es a mano, con la
-  cabeza puesta y mirando la versión de RouterOS.
+  cabeza puesta y mirando la versión de RouterOS. (Restaurar el **servidor** sí
+  se puede desde el panel; es otra cosa, y está en
+  [Mudarse a otro servidor](#mudarse-a-otro-servidor).)
 - **No edita las rutas ni la configuración general.** Solo la lista blanca de
   `AJUSTES_EDITABLES`. Las rutas locales —el repositorio, los binarios, el
   inventario— y Telegram (`telegram.token`, `telegram.chat_id` y
@@ -1331,8 +1481,12 @@ forma más rápida de que el panel deje de creerse justo cuando hay que mirarlo.
   se toca con un editor y con root. El repositorio **remoto** sí se configura
   desde el panel, y por qué esa distinción está explicado en
   [Ajustes desde el panel](#ajustes-desde-el-panel). El panel escribe únicamente
-  bajo `/root/mkbackup`: el inventario, los ajustes, las cuentas, la auditoría y
-  la imagen de fondo del login.
+  bajo `/root/mkbackup`, pero ahí dentro escribe **casi todo**: el inventario,
+  los ajustes, las cuentas, la auditoría, la imagen de fondo del login, los
+  `.tar.gz` que se suben para restaurar y —con `datos.mudanza`— **el contenido
+  entero de esa carpeta**, porque volcar un paquete reemplaza el servidor
+  completo, `config.yaml` incluido. Ver
+  [Mudarse a otro servidor](#mudarse-a-otro-servidor).
 - **No enseña los secretos de las configuraciones.** El diff los tapa (ver
   arriba). Se ve qué cambió, no lo que dice.
 - **No tiene HTTPS propio, ni API REST, ni 2FA, ni recuperación de clave por
@@ -1511,6 +1665,180 @@ entrar por SSH. Lo que se configura desde la web es el caso normal.
 
 ---
 
+## Mudarse a otro servidor
+
+**Esto no es otro respaldo más.** Los respaldos que hace este programa son de la
+configuración de los **routers**; lo de aquí es la copia del **propio
+servidor**: el histórico completo, el inventario, las cuentas del panel, los
+ajustes y el registro de auditoría. Sin ello, cambiar de máquina significa
+volver a dar de alta la flota a mano y empezar el historial de cero, que es
+exactamente lo que este proyecto existe para no tener que hacer.
+
+Es también otra cosa que el [repositorio
+remoto](#subir-los-respaldos-fuera-del-servidor), y se confunden a menudo: el
+remoto contesta a "conservo el histórico si se muere el disco", y esto a
+"levanto el sistema entero en otro sitio".
+
+### Qué va dentro, y por qué va todo
+
+La tentación es dejar fuera lo que se puede reconstruir. No se hace: una copia
+que hay que completar a mano no es una mudanza, es una lista de tareas. Y la
+mitad de lo "reconstruible" no lo es en la práctica — las claves de los routers
+del inventario, quién tenía qué permiso, cuándo empezó a fallar un equipo.
+
+| Pieza | Qué es | ¿Esencial? |
+|---|---|---|
+| `config.yaml` | La configuración: rutas, credenciales SSH y Telegram | **sí** |
+| `inventory.csv` | El inventario: la flota entera con sus credenciales | **sí** |
+| `usuarios.json` | Las cuentas del panel, sus roles y su alcance | **sí** |
+| `configs.git/` | **El histórico**: todas las versiones de todos los equipos | **sí** |
+| `ajustes.json` | Lo que se cambió desde el panel | no |
+| `estado.json` | Cómo fue el último ciclo | no |
+| `equipos.json` | Lo último que se supo de cada equipo: modelo y versión | no |
+| `programador.json` | Cuándo toca el próximo ciclo y cuándo se vio cada equipo | no |
+| `replica.json` | Cómo fue la última subida al repositorio remoto | no |
+| `auditoria.log` | Quién entró y quién tocó qué | no |
+| La imagen de fondo | La pantalla de entrada, con su nombre real | no |
+| `binarios/` | Los `.backup` binarios de cada equipo | no |
+
+La lista es `piezas()` en `mkbackup/mudanza.py`, y devuelve **también las que
+no existen todavía**: la pantalla tiene que poder decir "esto no está" en vez de
+callárselo. Un paquete al que le falta el archivo de cuentas deja el panel sin
+usuarios al restaurar, y eso hay que verlo **antes** de descargarlo, no después
+de mudarse. Lo que no existe no se mete y no es un error —un servidor recién
+instalado no tiene `replica.json` ni imagen de fondo—, pero si lo que falta es
+esencial se avisa.
+
+> **Ese archivo es la pieza más peligrosa que produce este programa.** Lleva las
+> claves SSH de la flota **en claro** (así las guarda el inventario), los hashes
+> de las claves del panel y, si `export.mostrar_secretos` está puesto —que es lo
+> normal—, las **passwords PPPoE y las PSK de wifi de tus clientes** dentro del
+> histórico. **Quien lo tiene, tiene la red.** Trátalo como tratarías el
+> inventario: se crea con permisos `0600` y el temporal nace ya privado, sin
+> ventana; cada descarga queda en la auditoría como `mudanza`, que es lo único
+> que convierte "alguien se llevó una copia" en un dato y no en una sospecha; y
+> bórralo en cuanto llegue a su destino.
+
+### Descargarla
+
+Desde el panel, en la tarjeta **Mudarse a otro servidor** de `/ajustes`, con el
+permiso `datos.mudanza` **y alcance total** (no existe la copia de un solo
+cliente: ver [Por qué `datos.mudanza` va aparte](#por-qué-datosmudanza-va-aparte)).
+La pantalla enseña antes qué se llevaría y cuánto pesa **en crudo** — el
+`.tar.gz` sale bastante más pequeño, porque el histórico son textos de
+configuración y comprimen mucho.
+
+O por terminal, que es lo que se usa en un cron o desde otra máquina:
+
+```bash
+.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml \
+    --exportar-datos /mnt/usb/
+```
+
+Si la ruta es **una carpeta que ya existe**, el paquete se escribe dentro con el
+nombre por defecto (`mkbackup-<servidor>-<fecha>.tar.gz`): dar una carpeta es lo
+que se teclea sin pensar, y fallar con un "es un directorio" no ayuda a nadie.
+Guardarlo **dentro** de lo que está empaquetando (el repositorio, los binarios)
+sí se rechaza: el tar se leería a sí mismo mientras crece, y el síntoma —un
+archivo enorme y una máquina sin disco— no se parece en nada a la causa.
+
+Con un ciclo de respaldo en marcha, tanto el panel como el terminal se niegan o
+descartan el resultado: el programador es **otro proceso** commiteando en el
+mismo repositorio, y un paquete hecho a mitad de un commit lleva el árbol de git
+incompleto. Lo peor es que no lo parece —el CRC y los sha256 cuadran, porque se
+calculan sobre lo que se copió—, así que se restaura sin una queja y los objetos
+aparecen sin la referencia que los nombra.
+
+### Restaurarla
+
+**Con los servicios parados** (`mkbackup.service` y el panel). Restaurar por
+debajo de un ciclo en marcha reescribe el repositorio que ese ciclo está usando,
+y lo que queda no es ni lo viejo ni lo nuevo:
+
+```bash
+systemctl stop mkbackup mkbackup-web
+
+.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml \
+    --restaurar-datos /mnt/usb/mkbackup-viejo-20260728-1130.tar.gz
+```
+
+Antes de tocar nada se dice **de qué servidor viene el paquete, de cuándo es y
+con qué versión se hizo**: equivocarse de archivo se nota aquí leyendo una
+línea, y no después, viendo el inventario de otro cliente en el panel.
+
+**Sin `--sobrescribir` no se pisa nada.** Si en la máquina ya hay datos, la
+orden se para con el disco intacto y dice cuáles estorban. Para reemplazarlos de
+verdad:
+
+```bash
+.venv/bin/python -m mkbackup.cli -c /root/mkbackup/config.yaml \
+    --restaurar-datos /mnt/usb/mkbackup-viejo-20260728-1130.tar.gz --sobrescribir
+```
+
+Y aun así **lo viejo no se borra**: se aparta con el sufijo
+`.antes-de-restaurar-<fecha>` al lado. Ocupa el doble un rato, y a cambio
+equivocarse de paquete se deshace.
+
+Todo se hace en dos tiempos. Primero se extrae **entero** a una carpeta de paso,
+comprobando los sha256 por el camino, y solo si el paquete estaba completo se
+empieza a colocar nada. Extraer encima de los datos buenos y descubrir a mitad
+que el archivo estaba truncado deja el servidor sin lo viejo y sin lo nuevo, que
+es el peor resultado posible de una restauración. Si aun así algo falla al
+colocar las piezas, lo apartado vuelve a su sitio en orden inverso y el servidor
+se queda como estaba.
+
+Al terminar avisa si el `config.yaml` restaurado apunta a rutas distintas de las
+que se acaban de usar: los datos se colocan donde dice la configuración de
+**esta** máquina, y acto seguido se restaura la del origen, que manda a partir
+del próximo arranque. Con la distribución de siempre (`/root/mkbackup`)
+coinciden y no hay nada que decir; si no, el sistema arrancaría mirando carpetas
+vacías y parecería que la restauración no hizo nada.
+
+### Restaurar desde el panel, y por qué el terminal no sobra
+
+También se puede desde `/ajustes`, y va en **dos peticiones**: se sube el
+archivo, se ve **de qué servidor viene y de cuándo es**, y solo entonces se
+confirma escribiendo **`RESTAURAR`** en un campo. Sustituir la flota entera por
+la de otro momento tiene que poder pararse leyendo una línea. (Son dos también
+por una razón práctica: el formulario lleva un único campo, así que el cuerpo se
+vuelca a disco según llega en vez de juntarlo en memoria — el histórico de un
+cliente grande son cientos de megas y este servidor no tiene ni swap.)
+
+Al terminar **se cierran todas las sesiones**, incluida la de quien acaba de
+hacerlo. El archivo de cuentas es otro: los tokens que quedaban en memoria
+pertenecen a usuarios que quizá ya no existen, o que existen con otro rol y otro
+alcance, y dejarlos vivos sería conservar unos permisos que ya no dice nadie.
+
+Aun así, **en una máquina nueva el panel no sirve**, y ese es el caso que de
+verdad importa: allí todavía no hay ninguna cuenta con la que entrar, porque las
+cuentas están justo dentro del paquete que se quiere restaurar. Por eso
+`--restaurar-datos` no es un extra sino el camino principal, y el panel escribe
+la orden exacta en pantalla.
+
+### Dentro del `.tar.gz`, nombres lógicos
+
+El paquete lleva un `manifiesto.json` y las piezas al lado, con nombres
+**lógicos y relativos** (`usuarios.json`, `configs.git/…`), **nunca rutas
+absolutas**. Importa por dos cosas:
+
+- Al restaurar, cada pieza va **a donde diga la configuración de la máquina de
+  destino**, no a donde estaba en la de origen. Eso permite mudarse entre
+  servidores con distinta distribución de carpetas.
+- Y quita de en medio la familia entera de agujeros de "extraer un tar te
+  escribe en `/etc`". Un nombre que empiece por `/`, que lleve `..` o que traiga
+  una unidad de Windows se rechaza, igual que un enlace simbólico, un
+  dispositivo o un fifo: nada de eso tiene una razón legítima de estar dentro, y
+  esto se extrae **como root**. Tampoco se da por buena la cuenta de bytes que
+  declara el manifiesto — se corta **mientras** se escribe, porque la gracia de
+  una bomba de descompresión es justo que lo que ocupa se sabe cuando ya se
+  escribió.
+
+Los usuarios y grupos del origen se borran del tar (todo entra como `root`, con
+`0600` y `0700`): no le sirven de nada al destino y, en un archivo que va a
+viajar, son información de más sobre el servidor.
+
+---
+
 ## Diferencias con Oxidized
 
 `mkbackup` nació para cubrir lo que Oxidized no hace: el **backup binario**.
@@ -1555,6 +1883,9 @@ mkbackup/
 ├── historial.py    Lectura del historial de git y enmascarado de secretos
 ├── estado.py       Avance de la ejecución en JSON, con latido
 ├── hechos.py       Modelo, versión y último respaldo bueno de cada equipo
+├── identidades.py  Preguntarle su nombre a un router o a la flota entera
+├── imagen.py       Ajuste de la imagen de fondo del login al subirla
+├── mudanza.py      Llevarse el servidor entero a otra máquina
 ├── sesion.py       Hash de la clave y sesiones en memoria
 ├── usuarios.py     Cuentas, roles, permisos y alcance por empresa
 ├── auditoria.py    Quién entró, quién lo intentó y quién tocó qué
@@ -1609,9 +1940,12 @@ python -m tests.test_web          # de donde viene la peticion y cuanto aguanta
 python -m tests.test_panel        # el panel levantado: cada formulario se envia
 python -m tests.test_imagen       # ajuste del fondo, metadatos y bombas de zip
 python -m tests.test_identidades  # el sondeo de nombres: credenciales e historial
+python -m tests.test_datos        # borrar lo de un equipo de baja, sobre git de verdad
+python -m tests.test_remoto       # la subida al remoto, y que el token no se escape
+python -m tests.test_mudanza      # empaquetar y restaurar el servidor entero
 ```
 
-**1277 comprobaciones** entre los quince archivos, todas en verde hoy. No
+**1662 comprobaciones** entre los dieciocho archivos, todas en verde hoy. No
 requieren ningún equipo ni red: `test_device` levanta un socket local que
 acepta la conexión y la cierra sin hablar, que es exactamente lo que hace un
 MikroTik con la lista de direcciones puesta.
@@ -1623,23 +1957,13 @@ navegador no avisa), ningún `const` repetido en el ámbito de fuera (es
 el escapado de lo que escribe una persona. Las tres cosas han roto este panel
 alguna vez con el servidor contestando 200.
 
-| Módulo | Comprobaciones |
-|---|---|
-| `test_limpieza` | 73 |
-| `test_almacen` | 41 |
-| `test_estado` | 38 |
-| `test_sesion` | 76 |
-| `test_historial` | 190 |
-| `test_importar` | 95 |
-| `test_planificador` | 95 |
-| `test_usuarios` | 259 |
-| `test_hechos` | 38 |
-| `test_device` | 43 |
-| `test_paginas` | 185 |
-| `test_web` | 22 |
-| `test_imagen` | 23 |
-| `test_panel` | 52 |
-| `test_identidades` | 47 |
+**Aquí había una tabla con las comprobaciones de cada archivo.** Se quitó a
+propósito: ese número solo se sabe **ejecutando** las pruebas, porque cuenta las
+llamadas a `comprobar()` que de verdad corren, y una tabla que se copia de la
+ejecución de hace tres meses envejece sin que se note. El total de arriba se
+comprueba de una vez cuando se lanzan todas; los repartos por archivo, no. Mejor
+sin números que con números inventados. Lo que cubre cada archivo está en el
+comentario de su línea, arriba.
 
 ### Probar el flujo completo sin hardware
 

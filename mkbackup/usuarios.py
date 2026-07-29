@@ -55,15 +55,21 @@ La regla que no se puede saltar por comodidad ya no es "que quede un admin"
 (el rol admin es editable, asi que el nombre del rol no garantiza nada), sino
 esta:
 
-    SIEMPRE tiene que quedar al menos un usuario que tenga a la vez el permiso
-    'usuarios' Y `alcance.todo`.
+    SIEMPRE tiene que quedar al menos un usuario que tenga a la vez LAS DOS
+    LLAVES -'usuarios.ver' y 'usuarios.editar' (ver LLAVES)- Y `alcance.todo`.
 
-Ese es el unico que puede volver a repartirlo todo: crear cuentas, arreglar
-roles y dar acceso a cualquier empresa. Sin ninguno, el panel queda sin llaves
-y la unica salida es editar este JSON a mano por SSH. Se protege en TODAS las
-operaciones que pueden romperla, incluidas las indirectas: borrar a esa cuenta,
-cambiarle el rol, quitarle el permiso con `permisos_menos`, recortarle el
-alcance, quitarle el permiso 'usuarios' AL ROL que se lo daba, o borrar ese rol.
+Son dos permisos y no uno desde que 'usuarios' se partio en finos, y hacen
+falta los dos: 'usuarios.editar' es lo que permite devolverle el rol o el
+permiso a alguien, y 'usuarios.ver' lo que permite llegar a esa pantalla. Con
+uno solo queda una cuenta que teoricamente manda pero no encuentra la puerta,
+que a efectos practicos es un panel cerrado.
+
+Ese usuario es el unico que puede volver a repartirlo todo: crear cuentas,
+arreglar roles y dar acceso a cualquier empresa. Sin ninguno, el panel queda sin
+llaves y la unica salida es editar este JSON a mano por SSH. Se protege en TODAS
+las operaciones que pueden romperla, incluidas las indirectas: borrar a esa
+cuenta, cambiarle el rol, quitarle las llaves con `permisos_menos`, recortarle
+el alcance, quitarselas AL ROL que se las daba, o borrar ese rol.
 
 POR QUE UN ARCHIVO APARTE Y NO config.yaml
 ------------------------------------------

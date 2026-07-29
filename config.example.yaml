@@ -180,7 +180,24 @@ web:
   # y pega aqui la linea que imprime. Asi este archivo se puede copiar o
   # respaldar sin repartir la clave del panel.
   clave_hash: ""
-  # Cuanto dura la sesion antes de volver a pedir la clave.
+  # Cuanto dura la sesion antes de volver a pedir la clave. Son DOS topes y
+  # cierra el que llegue primero:
+  #
+  #   sesion_minutos -> SIN ACTIVIDAD. Se reinicia cada vez que se usa el panel
+  #     de verdad, y OJO: el refresco automatico de la pantalla de Estado NO
+  #     cuenta como uso. Si contara, una pestana olvidada en un ordenador
+  #     encendido mantendria la sesion viva para siempre, que es justo la
+  #     situacion contra la que existe este tope.
+  #   sesion_horas -> TOPE ABSOLUTO. Aunque se este usando sin parar, pasadas
+  #     estas horas hay que volver a escribir la clave. Es lo que acota lo que
+  #     sirve una sesion robada.
+  #
+  # sesion_minutos NO puede pasar de sesion_horas: el panel se niega a arrancar
+  # en vez de aplicar en silencio un tope que nunca se alcanzaria.
+  #
+  # Ademas la cookie ya NO lleva caducidad: es una cookie de sesion del
+  # navegador, asi que cerrar el navegador cierra la sesion en ese momento.
+  sesion_minutos: 30
   sesion_horas: 8
   # Imagen de fondo de la pantalla de entrada (ruta a un archivo del disco).
   # Vacio = sin fondo. Formatos: jpg, png, webp o avif. Conviene que no pase de
