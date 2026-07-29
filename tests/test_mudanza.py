@@ -522,6 +522,141 @@ def main() -> None:
             comprobar("y la carpeta vacia llega al destino",
                       Path(destino_v.almacen.binarios).is_dir())
 
+        print("\n--- El manifiesto tampoco elige donde se escribe ---")
+        # Toda la validacion de rutas estaba en los MIEMBROS del tar, pero
+        # despues se recorre la lista del manifiesto y con ella se compone la
+        # ruta que se mueve. Unir con una ruta absoluta no la mete dentro: la
+        # sustituye entera, o sea que `paso / "/etc/shadow"` es `/etc/shadow`.
+        # Como no era un miembro del tar no habia nada que extraer, pero el
+        # archivo EXISTE en el sistema, y el os.replace de despues lo movia a la
+        # carpeta de datos. Corriendo como root eso borra cualquier cosa del
+        # disco y ademas se la lleva. Es el peor fallo que ha tenido esto.
+        with tempfile.TemporaryDirectory() as tmp_mal:
+            malo = Path(tmp_mal)
+            victima = malo / "victima.txt"
+            victima.write_text("no me toques", encoding="utf-8")
+            destino_m = servidor(malo / "destino")
+
+            for etiqueta, nombre_falso in (
+                ("una ruta absoluta", str(victima)),
+                ("una ruta que sube de carpeta", "../../victima.txt"),
+                ("una ruta con barras invertidas", "..\\..\\victima.txt"),
+            ):
+                trampa = tar_a_mano(
+                    malo / f"trampa-{abs(hash(etiqueta))}.tar.gz",
+                    miembros=[],
+                    manifiesto={
+                        "formato": 1, "programa": "mkbackup", "version": "x",
+                        "cuando": "", "servidor": "malo",
+                        "piezas": [{"clave": "usuarios", "nombre": nombre_falso,
+                                    "carpeta": False}],
+                    },
+                )
+                queja = se_queja(
+                    lambda: mudanza.restaurar(destino_m, trampa, sobrescribir=True)
+                )
+                comprobar(f"se rechaza {etiqueta} en el manifiesto ({queja[:40]})",
+                          bool(queja))
+                comprobar(f"y el archivo de al lado sigue donde estaba ({etiqueta})",
+                          victima.is_file()
+                          and victima.read_text(encoding="utf-8") == "no me toques")
+
+        print("\n--- Una bomba de descompresion no llena el disco ---")
+        # Comprimir ceros sale casi gratis: unos pocos megas de .tar.gz pueden
+        # declarar gigas dentro. Sin tope, desempaquetar llena el disco donde
+        # vive el repositorio, que es lo que rompe los respaldos. Y no es un
+        # susto pasajero: al terminar, esos gigas se mueven a su sitio.
+        with tempfile.TemporaryDirectory() as tmp_bomba:
+            bomba_dir = Path(tmp_bomba)
+            ruta_bomba = bomba_dir / "bomba.tar.gz"
+            enorme = 512 * 1024 * 1024
+            with tarfile.open(ruta_bomba, "w:gz") as tar:
+                manifiesto_bomba = {
+                    "formato": 1, "programa": "mkbackup", "version": "x",
+                    "cuando": "", "servidor": "malo",
+                    # Declara cuatro kilobytes y mete medio giga.
+                    "piezas": [{"clave": "git", "nombre": "configs.git",
+                                "carpeta": True, "archivos": 1, "bytes": 4096}],
+                }
+                crudo = json.dumps(manifiesto_bomba).encode("utf-8")
+                info = tarfile.TarInfo("manifiesto.json")
+                info.size = len(crudo)
+                tar.addfile(info, io.BytesIO(crudo))
+                relleno = tarfile.TarInfo("configs.git/relleno")
+                relleno.size = enorme
+                tar.addfile(relleno, io.BytesIO(bytes(enorme)))
+
+            comprimida = ruta_bomba.stat().st_size
+            comprobar(f"la bomba comprime muchisimo ({comprimida // 1024} KB "
+                      f"-> {enorme // (1024 * 1024)} MB)",
+                      comprimida < enorme // 100)
+            destino_b = servidor(bomba_dir / "destino")
+            queja = se_queja(
+                lambda: mudanza.restaurar(destino_b, ruta_bomba, sobrescribir=True)
+            )
+            comprobar(f"se rechaza antes de escribirla entera ({queja[:45]})",
+                      bool(queja))
+            # Y no puede haber quedado medio giga tirado por ahi.
+            suelto = sum(f.stat().st_size
+                         for f in bomba_dir.rglob("*") if f.is_file())
+            comprobar(f"y no deja el disco lleno ({suelto // (1024 * 1024)} MB "
+                      "sueltos)", suelto < enorme // 4)
+
+        print("\n--- Si falla a mitad, el servidor queda como estaba ---")
+        # El peor estado posible no es "no se restauro": es "se restauro la
+        # mitad". Con config.yaml ya cambiado y usuarios.json solo con el
+        # sufijo, el siguiente arranque siembra una cuenta de administrador con
+        # el hash que traiga ESE config.yaml. Una restauracion fallida no puede
+        # acabar entregando el panel.
+        with tempfile.TemporaryDirectory() as tmp_roto:
+            roto = Path(tmp_roto)
+            origen_r = servidor(roto / "de")
+            poblar(origen_r)
+            paquete_r = roto / "copia.tar.gz"
+            mudanza.empaquetar(origen_r, paquete_r)
+
+            destino_r = servidor(roto / "a")
+            poblar(destino_r)
+            antes = {
+                p: sha256(Path(p)) for p in
+                (destino_r.inventario, destino_r.almacen.usuarios)
+                if Path(p).is_file()
+            }
+
+            replace_bueno = mudanza.os.replace
+            estado = {"n": 0}
+
+            def replace_que_falla(origen, destino):
+                estado["n"] += 1
+                # Ya se han colocado unas cuantas piezas: justo el punto malo.
+                if estado["n"] == 6:
+                    raise OSError(18, "Invalid cross-device link")
+                return replace_bueno(origen, destino)
+
+            mudanza.os.replace = replace_que_falla
+            try:
+                queja = se_queja(
+                    lambda: mudanza.restaurar(destino_r, paquete_r,
+                                              sobrescribir=True)
+                )
+            finally:
+                mudanza.os.replace = replace_bueno
+
+            comprobar(f"la restauracion a medias se cuenta como fallo "
+                      f"({queja[:45]})", bool(queja))
+            comprobar("y dice que se dejo todo como estaba",
+                      "como estaba" in queja or "sufijo" in queja)
+            despues = {
+                p: sha256(Path(p)) for p in
+                (destino_r.inventario, destino_r.almacen.usuarios)
+                if Path(p).is_file()
+            }
+            comprobar("el inventario y las cuentas siguen siendo los de antes",
+                      antes == despues)
+            # Lo importante de todo: el archivo de cuentas TIENE que existir.
+            comprobar("el archivo de cuentas no se quedo desaparecido",
+                      Path(destino_r.almacen.usuarios).is_file())
+
     print()
     if FALLOS:
         print(f"{len(FALLOS)} prueba(s) fallidas:")

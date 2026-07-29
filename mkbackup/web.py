@@ -2526,6 +2526,12 @@ class Manejador(BaseHTTPRequestHandler):
             return None
         if not self.ctx.usuarios.puede(self.usuario, "datos.mudanza"):
             return None
+        # Mismo alcance que exige _puede_mudarse. Si no se comprobara tambien
+        # aqui, a una cuenta limitada a un cliente se le pintaria el cuadro con
+        # el tamano del historico de TODAS las empresas y un boton que luego
+        # contesta 403: ensena un dato que no le toca y ademas parece averiado.
+        if not self.usuario.alcance.todo:
+            return None
         try:
             return mudanza.resumen(self.cfg)
         except OSError as exc:
@@ -2541,7 +2547,7 @@ class Manejador(BaseHTTPRequestHandler):
         propio, que se anote SIEMPRE en la auditoria -antes de mandar nada, no
         despues- y que el archivo temporal nazca ya privado.
         """
-        if not self._permite("datos.mudanza"):
+        if not self._puede_mudarse():
             return
         # El formulario no lleva campos, pero SI lleva cuerpo. Sin leerlo, lo
         # que quede en el socket lo lee la peticion siguiente como su primera
@@ -2563,8 +2569,15 @@ class Manejador(BaseHTTPRequestHandler):
             return
 
         nombre = mudanza.nombre_sugerido(self.cfg)
-        lado = Path(self.cfg.almacen.estado).parent
-        temporal = lado / f".{nombre}.parcial"
+        lado = self._carpeta_datos()
+        # El nombre sugerido solo baja al MINUTO, asi que dos descargas
+        # seguidas lo comparten. Sin la parte al azar, la segunda abre el mismo
+        # archivo con O_TRUNC mientras la primera lo esta mandando: quien
+        # descargaba recibe menos bytes de los que se le prometieron y se
+        # guarda un .tar.gz truncado que parece una copia entera. De los fallos
+        # posibles aqui ese es el peor, porque no se nota hasta que hace falta.
+        temporal = lado / f".{nombre}.{secrets.token_hex(8)}.parcial"
+        antes = estado_programador(self.cfg)
         try:
             # Con el candado del panel: si alguien esta purgando un equipo
             # desde otra pestana, no se empaqueta el repositorio a mitad de la
@@ -2583,6 +2596,36 @@ class Manejador(BaseHTTPRequestHandler):
             )
             return
 
+        # Y se vuelve a mirar el programador, ahora que ya esta hecho. La
+        # comprobacion de antes estrecha la ventana pero no la cierra: el
+        # programador es OTRO PROCESO y el candado de aqui no cruza esa
+        # frontera, asi que un ciclo puede arrancar justo despues de mirar y
+        # ponerse a commitear mientras se empaqueta. El paquete que sale de ahi
+        # lleva el arbol de git a medias, y lo peor es que no lo parece: el CRC
+        # y los sha256 se calculan sobre lo que se copio, o sea que se restaura
+        # sin una queja y los objetos aparecen sin la referencia que los nombra.
+        #
+        # Se compara el contador de ciclos y no solo 'corriendo', porque un
+        # ciclo corto puede haber empezado Y terminado mientras se comprimia.
+        despues = estado_programador(self.cfg)
+        if (despues.get("corriendo")
+                or despues.get("ciclos") != antes.get("ciclos")
+                or despues.get("ultima") != antes.get("ultima")):
+            try:
+                temporal.unlink()
+            except OSError:
+                pass
+            log.warning("Un ciclo de respaldo corrio mientras se empaquetaba: "
+                        "la copia se descarta")
+            self._pintar_ajustes(
+                error="Mientras se preparaba la copia arranco un respaldo y "
+                      "estuvo escribiendo en el repositorio, asi que el paquete "
+                      "podria haber salido a medias. Se ha descartado; vuelve a "
+                      "pedirlo cuando el ciclo termine.",
+                codigo=409,
+            )
+            return
+
         # Se anota ANTES de mandarla. Si se anotara despues, una descarga que se
         # corta a la mitad no dejaria rastro, y una copia parcial de esto sigue
         # llevando dentro el inventario entero.
@@ -2598,6 +2641,12 @@ class Manejador(BaseHTTPRequestHandler):
             with temporal.open("rb") as fh:
                 for trozo in iter(lambda: fh.read(mudanza.TROZO), b""):
                     self.wfile.write(trozo)
+        except (BrokenPipeError, ConnectionResetError):
+            # El navegador cancelo la descarga. Es normal y no es un error del
+            # panel: sin cazarlo, cada cancelacion deja un volcado de pila
+            # entero en el journal y acaba tapando lo que si importa.
+            log.info("La descarga de la copia se corto desde el navegador")
+            self.close_connection = True
         finally:
             # Pase lo que pase, incluida una descarga que el navegador corta a
             # la mitad: este archivo no puede quedarse en el disco. Es una copia
@@ -2625,6 +2674,44 @@ class Manejador(BaseHTTPRequestHandler):
 
     def _carpeta_datos(self) -> Path:
         return Path(self.cfg.almacen.estado).parent
+
+    def _puede_mudarse(self, escribir: bool = False) -> bool:
+        """Permiso Y ALCANCE TOTAL. Las dos cosas, y la segunda no es un extra.
+
+        Esta copia es del SERVIDOR ENTERO: no hay forma de sacar la de una
+        empresa. Dentro va el inventario completo con las claves SSH de todas,
+        el archivo de cuentas y el historico de todos los clientes. O sea que
+        sin esta comprobacion, una cuenta limitada a un cliente con
+        'datos.mudanza' se lleva de una vez justo lo que _visibles y
+        _alcanzable le niegan equipo a equipo.
+        Es la misma regla que en _huerfanos, y aqui pesa mas: alli era mirar y
+        borrar lo de un equipo dado de baja, y esto es la red de todo el mundo.
+
+        Y por el otro lado es peor todavia. El manifiesto viaja en claro dentro
+        del propio paquete, asi que quien pueda restaurar puede editar el
+        usuarios.json de dentro, recalcular su sha256, subirlo y salir siendo
+        administrador. Restaurar no es "escribir mucho": es poder reescribir
+        quien manda.
+        """
+        if escribir:
+            if not self._editable("datos.mudanza"):
+                return False
+        elif not self._permite("datos.mudanza"):
+            return False
+
+        if not self.usuario.alcance.todo:
+            log.warning("%s intento la copia del servidor sin alcance total",
+                        self.usuario.nombre)
+            self._anotar("fuera_de_alcance", "la copia del servidor entero")
+            self._error(
+                403,
+                "Esta copia se lleva el servidor entero -todas las empresas, "
+                "sus credenciales y las cuentas del panel-, asi que hace falta "
+                "una cuenta con alcance total. No existe la copia de un solo "
+                "cliente.",
+            )
+            return False
+        return True
 
     def _recibir_paquete(self, destino: Path) -> str:
         """Vuelca a `destino` el archivo del formulario. '' si fue bien.

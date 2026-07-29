@@ -28,18 +28,25 @@ produce este programa. De ahi tres decisiones:
   - Cada descarga se anota en la auditoria. Es lo unico que convierte "alguien
     se llevo una copia" en un dato y no en una sospecha.
 
-Por que empaqueta la web y restaura el terminal
------------------------------------------------
-Descargar se hace desde el panel porque es donde esta quien lo necesita.
-Restaurar NO, y no es por prudencia: en el servidor nuevo todavia no hay
-ninguna cuenta con la que entrar al panel -las cuentas estan justo dentro del
-paquete que se quiere restaurar-. Ademas restaurar pisa el archivo de usuarios
-por debajo de la sesion que lo esta pidiendo, y el historico de un cliente
-grande no es un formulario web: es cientos de megas subiendo por un servidor
-HTTP de la biblioteca estandar.
+Se restaura desde los dos sitios, y el terminal no sobra
+--------------------------------------------------------
+Descargar se hace desde el panel, porque es donde esta quien lo necesita.
+Restaurar se puede desde el panel tambien, pero el caso que de verdad importa
+-la maquina nueva- solo lo cubre el terminal: alli todavia no hay ninguna
+cuenta con la que entrar, porque las cuentas estan justo dentro del paquete que
+se quiere restaurar. Por eso `mkbackup --restaurar-datos` no es un extra, es el
+camino principal, y el panel escribe la orden exacta en pantalla.
 
-Asi que se restaura con `mkbackup --restaurar-datos`, en la maquina nueva, con
-los servicios parados. El panel dice la orden exacta.
+Restaurar desde la web va en DOS peticiones -subir y confirmar- por dos razones
+distintas. Una: se lee de que servidor viene el paquete y de cuando es antes de
+que reemplace nada, porque equivocarse de archivo aqui sustituye la flota
+entera. Y dos: el formulario de subida lleva un unico campo, asi que el cuerpo
+se puede volcar a disco segun llega en vez de juntarlo en memoria; el historico
+de un cliente grande son cientos de megas y este servidor no tiene ni swap.
+
+Restaurar pisa ademas el archivo de usuarios por debajo de la sesion que lo
+esta pidiendo, asi que al terminar se cierran todas las sesiones: los tokens
+que quedaban en memoria pertenecen a cuentas que quiza ya no existen.
 
 Formato
 -------
@@ -57,6 +64,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import tarfile
@@ -87,6 +95,11 @@ NOMBRE_MANIFIESTO = "manifiesto.json"
 # grande no cabe comodo en la memoria de un VPS pequeno, y este servidor en
 # concreto no tiene ni swap.
 TROZO = 256 * 1024
+
+# Holgura sobre lo que el manifiesto dice que ocupa, al desempaquetar. Existe
+# porque el tar redondea cada archivo a bloques y las carpetas tambien cuentan:
+# ajustarlo al byte haria fallar paquetes buenos.
+MARGEN = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -468,7 +481,10 @@ def restaurar(cfg, ruta, sobrescribir: bool = False) -> dict:
     paso = Path(tempfile.mkdtemp(prefix=".mudanza-", dir=str(lado)))
     os.chmod(paso, 0o700)
 
-    puestas, apartadas, ignoradas = [], [], []
+    puestas, ignoradas = [], []
+    # (destino, donde se aparto lo que habia). En pares para poder deshacerlo:
+    # ver el except de mas abajo.
+    movidas: list[tuple[Path, Path]] = []
     try:
         traidas = _extraer(ruta, manifiesto, paso)
 
@@ -512,15 +528,49 @@ def restaurar(cfg, ruta, sobrescribir: bool = False) -> dict:
             if final.exists():
                 aparte = final.with_name(f"{final.name}.antes-de-restaurar-{marca}")
                 os.replace(final, aparte)
-                apartadas.append(str(aparte))
+                movidas.append((final, aparte))
             os.replace(origen, final)
             puestas.append(str(final))
+    except OSError as exc:
+        # Se rompio a mitad de colocar las piezas. Lo que queda es lo peor
+        # posible: unas cosas del paquete y otras de antes, y encima el
+        # archivo de cuentas puede haberse quedado solo con el sufijo. Ese
+        # estado concreto ENTREGA EL PANEL, porque al arrancar sin usuarios.json
+        # se siembra una cuenta de administrador con el hash que traiga el
+        # config.yaml, que es justo la pieza que ya se cambio (va la primera).
+        #
+        # Asi que se deshace: cada archivo apartado vuelve a su sitio, en orden
+        # inverso. Lo que ya se habia colocado del paquete se pierde, que es lo
+        # que se quiere -se estaba abortando-, y el servidor se queda como
+        # estaba.
+        devueltas, rotas = 0, []
+        for final, aparte in reversed(movidas):
+            try:
+                os.replace(aparte, final)
+                devueltas += 1
+            except OSError:
+                rotas.append(str(final))
+        log.error("La restauracion fallo a mitad (%s); devueltas %d piezas",
+                  exc, devueltas)
+        if rotas:
+            raise ErrorMudanza(
+                f"la restauracion fallo ({exc}) y ADEMAS no se pudo dejar todo "
+                "como estaba. Sin arreglar se quedaron: " + ", ".join(rotas) +
+                ". Sus copias llevan el sufijo '.antes-de-restaurar-"
+                f"{marca}'; hay que devolverlas a mano antes de arrancar los "
+                "servicios."
+            ) from exc
+        raise ErrorMudanza(
+            f"la restauracion fallo ({exc}). El servidor se ha dejado como "
+            "estaba: no se cambio ninguna pieza."
+        ) from exc
     finally:
         _borrar_arbol(paso)
 
     avisos = _revisar_rutas(cfg, puestas)
     return {"manifiesto": manifiesto, "puestas": puestas,
-            "apartadas": apartadas, "ignoradas": ignoradas, "avisos": avisos}
+            "apartadas": [str(a) for _, a in movidas],
+            "ignoradas": ignoradas, "avisos": avisos}
 
 
 def _extraer(ruta: Path, manifiesto: dict, paso: Path) -> dict[str, Path]:
@@ -533,10 +583,52 @@ def _extraer(ruta: Path, manifiesto: dict, paso: Path) -> dict[str, Path]:
     lineas de manifiesto-; ahi responde el CRC del propio gzip, que si detecta
     un corte.
     """
-    por_nombre = {p.get("nombre"): p for p in manifiesto.get("piezas") or []
-                  if isinstance(p, dict)}
+    # El nombre que dice el MANIFIESTO se valida igual que el de un miembro del
+    # tar, y esto no es por simetria.
+    #
+    # Toda la validacion de rutas estaba en el bucle de los miembros, pero
+    # despues se recorre esta otra lista, que sale del JSON del manifiesto, y
+    # con ella se compone `paso / nombre`. Ahi hay una trampa de pathlib: unir
+    # con una ruta ABSOLUTA no la mete dentro, la sustituye entera, o sea que
+    # `paso / "/etc/shadow"` es `/etc/shadow` a secas. Como no era un miembro
+    # del tar no habia archivo que extraer, pero `sitio.exists()` decia que si
+    # -claro, existe en el sistema- y el `os.replace` de mas abajo MOVIA ese
+    # archivo a la carpeta de datos. Corriendo como root, eso es borrar
+    # cualquier cosa del disco y ademas leersela.
+    por_nombre = {}
+    for pieza in manifiesto.get("piezas") or []:
+        if not isinstance(pieza, dict):
+            continue
+        nombre = pieza.get("nombre")
+        if not isinstance(nombre, str) or not _nombre_seguro(nombre):
+            raise ErrorMudanza(
+                f"el manifiesto declara una ruta que no se acepta: {nombre!r}"
+            )
+        por_nombre[nombre] = pieza
     if not por_nombre:
         raise ErrorMudanza("el paquete no declara ninguna pieza")
+
+    # Tope de lo que se puede escribir al desempaquetar. Sin el, un .tar.gz de
+    # dos megas que dice tener dentro un archivo de dos gigas se extrae entero:
+    # comprimir ceros sale casi gratis, asi que subir cien megas basta para
+    # llenar el disco del servidor. Y no se queda en un susto pasajero, porque
+    # al terminar la extraccion esos gigas se mueven a su sitio definitivo.
+    #
+    # Se acota por lo que el propio manifiesto dice que ocupa (con holgura) y
+    # ademas por el disco que queda: un manifiesto tambien se puede inflar.
+    declarado = sum(int(p.get("bytes") or 0) for p in por_nombre.values())
+    tope = declarado + MARGEN
+    try:
+        libre = shutil.disk_usage(paso).free
+    except OSError:
+        libre = None
+    if libre is not None:
+        tope = min(tope, max(0, libre - MARGEN))
+    if tope <= 0:
+        raise ErrorMudanza(
+            "no queda disco suficiente para desempaquetar la copia aqui"
+        )
+    escrito = [0]
 
     with tarfile.open(ruta, "r:gz") as tar:
         for miembro in tar:
@@ -560,11 +652,16 @@ def _extraer(ruta: Path, manifiesto: dict, paso: Path) -> dict[str, Path]:
                     f"el paquete lleva {miembro.name!r}, que no esta declarado "
                     "en el manifiesto"
                 )
-            _sacar(tar, miembro, paso)
+            _sacar(tar, miembro, paso, tope, escrito)
 
     traidas: dict[str, Path] = {}
     for nombre, declarada in por_nombre.items():
         sitio = paso / nombre
+        # Cinturon ademas del tirante: aunque `nombre` ya se valido arriba, lo
+        # que se compone aqui es la ruta que se va a mover, y esa es la que
+        # tiene que estar dentro de la carpeta de paso.
+        if not _dentro_de_o_igual(sitio, paso):
+            raise ErrorMudanza(f"ruta fuera de sitio en el manifiesto: {nombre!r}")
         if not sitio.exists():
             raise ErrorMudanza(
                 f"el manifiesto declara {nombre} pero el paquete no lo trae: "
@@ -580,7 +677,8 @@ def _extraer(ruta: Path, manifiesto: dict, paso: Path) -> dict[str, Path]:
     return traidas
 
 
-def _sacar(tar: tarfile.TarFile, miembro: tarfile.TarInfo, paso: Path) -> None:
+def _sacar(tar: tarfile.TarFile, miembro: tarfile.TarInfo, paso: Path,
+           tope: int, escrito: list) -> None:
     """Escribe un miembro ya validado, siempre con permisos privados.
 
     Se escribe a mano en vez de usar extract() porque asi los permisos son los
@@ -603,6 +701,17 @@ def _sacar(tar: tarfile.TarFile, miembro: tarfile.TarInfo, paso: Path) -> None:
     descriptor = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "wb") as fh:
         for trozo in iter(lambda: fuente.read(TROZO), b""):
+            escrito[0] += len(trozo)
+            # Se corta EN MEDIO de escribir, no despues: la gracia de una bomba
+            # de descompresion es justo que lo que ocupa se sabe cuando ya se
+            # escribio. El sha256 del manifiesto no sirve aqui por lo mismo, y
+            # ademas lo elige quien fabrica el paquete.
+            if escrito[0] > tope:
+                raise ErrorMudanza(
+                    f"el paquete se expande mas de lo que declara (mas de "
+                    f"{tope // (1024 * 1024)} MB al llegar a {miembro.name!r}): "
+                    "esta manipulado o no cabe aqui. No se ha tocado nada."
+                )
             fh.write(trozo)
 
 
@@ -617,8 +726,6 @@ def _dentro_de_o_igual(hijo: Path, padre: Path) -> bool:
 
 
 def _borrar_arbol(raiz: Path) -> None:
-    import shutil
-
     try:
         shutil.rmtree(raiz, ignore_errors=True)
     except OSError:
